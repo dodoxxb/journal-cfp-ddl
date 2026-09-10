@@ -6,6 +6,12 @@
  * 2. 分片结果缓存在模块级 Map 中，重复访问 / 组件重挂载不再发起网络请求；
  * 3. 同一个分片的并发请求会被合并（in-flight 去重）；
  * 4. 对外只暴露纯函数 + 少量命令式 API，便于单元测试 mock。
+ *
+ * 加载策略（筛选感知）：
+ * - 无筛选时仍只加载当前月 + 未来 2 个月（INITIAL_MONTH_SPAN），保持首屏性能；
+ * - 当激活了出版社 / 学科 / 类型筛选时，App 会调用 selectMonthsForFacets 计算
+ *   「可能含匹配结果」的候选月份，并自动分批加载（index.facet_months 缺失时降级为原行为）；
+ * - 「加载更多」默认只向未来扩展；开启「显示已过期」(includePast) 后才允许加载早于当前月的分片。
  */
 
 import type { CFPRecord, CfpIndex, JournalMetric, MonthShardMeta } from './types';
@@ -139,20 +145,102 @@ export function selectInitialMonths(
 }
 
 /**
- * 计算「加载更多」时要追加的月份：已加载月份之后的连续 N 个未加载月份。
- * 早于当前月的分片（已过期的历史数据）不主动加载。
+ * 计算「加载更多」时要追加的月份。
+ * - includePast=false（默认）：只取当前月及未来、且未加载的连续 N 个分片；
+ * - includePast=true：额外把早于当前月（已过期）的未加载分片按时间倒序（最近的过去优先）追加在末尾，
+ *   以便开启「显示已过期」后也能浏览历史数据。
  */
 export function selectNextMonths(
   index: CfpIndex,
   loaded: Iterable<string>,
   now: Date = new Date(),
   count: number = LOAD_MORE_MONTH_SPAN,
+  includePast = false,
 ): string[] {
   const loadedSet = new Set(loaded);
   const current = monthKeyOf(now);
-  return listMonthKeys(index)
-    .filter((key) => key >= current && !loadedSet.has(key))
-    .slice(0, count);
+  const all = listMonthKeys(index);
+  const future = all.filter((key) => key >= current && !loadedSet.has(key));
+  if (!includePast) {
+    return future.slice(0, count);
+  }
+  const past = all
+    .filter((key) => key < current && !loadedSet.has(key))
+    .sort()
+    .reverse();
+  return [...future, ...past].slice(0, count);
+}
+
+/**
+ * 两个月份键之间的整数月距离（可为负：past 为负，future 为正）。
+ */
+function monthDistance(key: string, current: string): number {
+  const ay = Number(key.slice(0, 4));
+  const am = Number(key.slice(5, 7));
+  const by = Number(current.slice(0, 4));
+  const bm = Number(current.slice(5, 7));
+  return ay * 12 + (am - 1) - (by * 12 + (bm - 1));
+}
+
+/**
+ * 根据当前激活的筛选条件，计算「可能包含匹配结果」的月份键，
+ * 按与当前月的距离升序排列（最近的先加载；同等距离下未来优先于过去）。
+ * 多个筛选维度取交集：某月必须在每个激活维度下都有 count > 0。
+ * index.facet_months 缺失时返回 null（调用方降级为原行为）。
+ *
+ * @param index   索引（需含可选 facet_months）
+ * @param facets  激活的筛选维度（空数组表示不限）
+ * @param now     当前时间（默认 new Date）
+ * @returns 候选月份键升序数组；无激活维度时返回 []；facet_months 缺失时返回 null
+ */
+export function selectMonthsForFacets(
+  index: CfpIndex,
+  facets: { publishers?: string[]; categories?: string[]; types?: string[] },
+  now: Date = new Date(),
+): string[] | null {
+  const fm = index.facet_months;
+  if (!fm) return null;
+
+  const available = listMonthKeys(index);
+  const current = monthKeyOf(now);
+
+  // 每个激活维度 -> 该维度下「有匹配数据」的月份集合
+  const dimensionMonths: Set<string>[] = [];
+  const collect = (dim: 'publisher' | 'category' | 'type', names: string[] | undefined) => {
+    if (!names || names.length === 0) return;
+    const dimMap = fm[dim];
+    if (!dimMap) return;
+    const set = new Set<string>();
+    for (const name of names) {
+      const monthMap = dimMap[name];
+      if (!monthMap) continue;
+      for (const m of Object.keys(monthMap)) {
+        if ((monthMap[m] ?? 0) > 0) set.add(m);
+      }
+    }
+    if (set.size > 0) dimensionMonths.push(set);
+  };
+  collect('publisher', facets.publishers);
+  collect('category', facets.categories);
+  collect('type', facets.types);
+
+  if (dimensionMonths.length === 0) return [];
+
+  // 取各激活维度的交集
+  let candidateSet = dimensionMonths[0];
+  for (let i = 1; i < dimensionMonths.length; i++) {
+    candidateSet = new Set([...candidateSet].filter((m) => dimensionMonths[i].has(m)));
+  }
+
+  // 仅保留索引中真实存在的月份，按与当前月距离升序（同等距离未来优先）
+  const candidates = available.filter((m) => candidateSet.has(m));
+  candidates.sort((a, b) => {
+    const da = monthDistance(a, current);
+    const db = monthDistance(b, current);
+    if (Math.abs(da) !== Math.abs(db)) return Math.abs(da) - Math.abs(db);
+    return db - da; // 距离相等：未来(db>0)排前面
+  });
+  return candidates;
 }
 
 /** 索引里「当月及未来月份」的 CFP 总条数（即用户最多可浏览的条数） */

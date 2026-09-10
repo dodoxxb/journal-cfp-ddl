@@ -54,6 +54,7 @@ import {
   monthKeyOf,
   resetShardCache,
   selectInitialMonths,
+  selectMonthsForFacets,
   selectNextMonths,
 } from './lib/dataLoader';
 import {
@@ -70,7 +71,7 @@ import { parseFilterState, serializeFilterState } from './lib/urlState';
 import { useTheme } from './hooks/useTheme';
 import { useNow } from './hooks/useNow';
 import { useDebounce } from './hooks/useDebounce';
-import { NOW_TICK_MS, SEARCH_DEBOUNCE_MS } from './lib/constants';
+import { LOAD_MORE_MONTH_SPAN, NOW_TICK_MS, SEARCH_DEBOUNCE_MS } from './lib/constants';
 
 // ───────────────────────────────────────────────────────────────────
 // 倒计时颜色策略（urgency 语义）
@@ -263,6 +264,8 @@ interface FilterBarProps {
   types: string[];
   journalMeta: Map<string, JournalMetric>;
   index: CfpIndex | null;
+  showExpired: boolean;
+  onToggleExpired: () => void;
 }
 
 const RANGE_OPTIONS: { value: TimeRange; label: string }[] = [
@@ -278,7 +281,7 @@ const SORT_OPTIONS: { value: CfpSortField; label: string }[] = [
   { value: 'publisher', label: '按出版社' },
 ];
 
-function FilterBar({ filter, setFilter, records, publishers, categories, types, journalMeta, index }: FilterBarProps) {
+function FilterBar({ filter, setFilter, records, publishers, categories, types, journalMeta, index, showExpired, onToggleExpired }: FilterBarProps) {
   // 芯片计数用 index.json 全库统计（稳定、真实），而非已加载子集——
   // 否则未加载月份里的出版社（如 Wiley/ACS）会错误显示 (0)
   const pubCounts = useMemo(() => {
@@ -410,6 +413,17 @@ function FilterBar({ filter, setFilter, records, publishers, categories, types, 
           </button>
         </div>
       )}
+
+      {/* 显示已过期开关：默认关闭，保持「向前看」；开启后允许加载并展示早于当前月的分片 */}
+      <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={showExpired}
+          onChange={onToggleExpired}
+          className="rounded border-gray-300 dark:border-gray-700 text-indigo-600 focus:ring-indigo-500"
+        />
+        显示已过期（含早于当前月的分片）
+      </label>
     </div>
   );
 }
@@ -684,9 +698,13 @@ interface ListAreaProps {
   loadingMore: boolean;
   hasMoreMonths: boolean;
   journalMeta: Map<string, JournalMetric>;
+  index: CfpIndex | null;
+  activeFacets: { publishers: string[]; categories: string[]; types: string[] };
+  showExpired: boolean;
+  onShowExpired: () => void;
 }
 
-function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMore, loadingMore, hasMoreMonths, journalMeta }: ListAreaProps) {
+function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMore, loadingMore, hasMoreMonths, journalMeta, index, activeFacets, showExpired, onShowExpired }: ListAreaProps) {
   const [page, setPage] = useState(1);
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
 
@@ -711,6 +729,36 @@ function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMo
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, [totalPages]);
 
+  // 解释性空状态：某筛选维度下确有数据，但全部位于已过期（早于当前月）月份。
+  // 此时给出总条数 + 最近截止月份，并提供「查看全部（含已过期）」按钮，
+  // 点击后开启「显示已过期」并加载对应月份。facet_months 缺失时降级为通用空状态。
+  const expiredInfo = useMemo(() => {
+    if (filtered.length > 0) return null;
+    const hasFacet =
+      activeFacets.publishers.length > 0 ||
+      activeFacets.categories.length > 0 ||
+      activeFacets.types.length > 0;
+    if (!hasFacet || !index) return null;
+    const candidates = selectMonthsForFacets(index, activeFacets);
+    if (!candidates || candidates.length === 0) return null;
+    const current = monthKeyOf();
+    const allPast = candidates.every((k) => k < current);
+    if (!allPast || showExpired) return null;
+
+    let total = 0;
+    const sumCounts = (list: { name: string; count: number }[] | undefined, set: Set<string>) =>
+      (list ?? []).filter((x) => set.has(x.name)).reduce((s, x) => s + x.count, 0);
+    if (activeFacets.publishers.length > 0) {
+      total = sumCounts(index.publishers, new Set(activeFacets.publishers));
+    } else if (activeFacets.categories.length > 0) {
+      total = sumCounts(index.categories, new Set(activeFacets.categories));
+    } else if (activeFacets.types.length > 0) {
+      total = sumCounts(index.types, new Set(activeFacets.types));
+    }
+    const latestMonth = candidates.reduce((a, b) => (b > a ? b : a), candidates[0]);
+    return { total, latestMonth };
+  }, [filtered.length, activeFacets, index, showExpired]);
+
   if (filtered.length === 0 && records.length === 0) {
     return (
       <div className="text-center py-12 text-gray-500 dark:text-gray-400">
@@ -720,6 +768,24 @@ function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMo
     );
   }
   if (filtered.length === 0) {
+    if (expiredInfo && expiredInfo.total > 0) {
+      return (
+        <div className="text-center py-12 text-gray-500 dark:text-gray-400">
+          <Filter className="w-6 h-6 mx-auto mb-2 opacity-50" />
+          <p className="text-sm">
+            该筛选维度下共 <span className="font-medium text-gray-700 dark:text-gray-300">{expiredInfo.total}</span> 条，
+            但全部位于已过期月份（最近截止 {expiredInfo.latestMonth}）
+          </p>
+          <button
+            onClick={onShowExpired}
+            className="mt-3 px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 inline-flex items-center gap-2"
+          >
+            <Clock className="w-4 h-4" />
+            查看全部 {expiredInfo.total} 条（含已过期）
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="text-center py-12 text-gray-500 dark:text-gray-400">
         <Filter className="w-6 h-6 mx-auto mb-2 opacity-50" />
@@ -912,10 +978,75 @@ export default function App() {
     [filter],
   );
 
+  // 「显示已过期」开关：开启后允许加载并展示早于当前月的分片（默认关闭，保持向前看）
+  const [showExpired, setShowExpired] = useState(false);
+  // 自动扩展时的轻量提示（如「已自动扩展到 2026-08 以匹配你的筛选」）
+  const [expansionHint, setExpansionHint] = useState<string | null>(null);
+
+  // 筛选感知的自动范围扩展：
+  // 当激活 publisher / category / type 且已加载月份里匹配结果为 0，但 selectMonthsForFacets
+  // 算出的候选月份里还有未加载的（且未被「显示已过期」屏蔽），自动分批加载，直到出现结果或候选穷尽。
+  // index.facet_months 缺失时 selectMonthsForFacets 返回 null，此处优雅降级为原行为（不自动扩展）。
+  const facetSig = `${filter.publishers.join(',')}|${filter.categories.join(',')}|${filter.types.join(',')}|${showExpired}`;
+  const autoExpandedSig = useRef<string>('');
+
+  useEffect(() => {
+    if (!index) return;
+    const hasFacet = filter.publishers.length > 0 || filter.categories.length > 0 || filter.types.length > 0;
+    if (!hasFacet) {
+      setExpansionHint(null);
+      autoExpandedSig.current = '';
+      return;
+    }
+    const candidates = selectMonthsForFacets(index, {
+      publishers: filter.publishers,
+      categories: filter.categories,
+      types: filter.types,
+    });
+    if (!candidates) return; // facet_months 缺失 → 降级
+
+    const current = monthKeyOf(now);
+    let targets = candidates.filter((k) => !loadedKeys.has(k));
+    if (!showExpired) targets = targets.filter((k) => k >= current);
+
+    // 仅当当前尚无匹配结果、且本次筛选签名尚未自动扩展过时，才自动加载
+    if (sorted.length > 0) return;
+    if (targets.length === 0) return;
+    if (autoExpandedSig.current === facetSig) return;
+    autoExpandedSig.current = facetSig;
+    setExpansionHint(null);
+
+    (async () => {
+      setLoadingMore(true);
+      try {
+        const loaded: string[] = [];
+        for (let i = 0; i < targets.length; i += LOAD_MORE_MONTH_SPAN) {
+          const batch = targets.slice(i, i + LOAD_MORE_MONTH_SPAN);
+          const res = await Promise.all(
+            batch.map(async (k) => [k, await loadShard(index, k)] as const),
+          );
+          const recs = res.flatMap(([, r]) => r);
+          setRecords((prev) => [...prev, ...recs]);
+          setLoadedKeys((prev) => {
+            const n = new Set(prev);
+            batch.forEach((k) => n.add(k));
+            return n;
+          });
+          loaded.push(...batch);
+        }
+        if (loaded.length > 0) {
+          setExpansionHint(`已自动扩展到 ${loaded.join('、')} 以匹配你的筛选`);
+        }
+      } finally {
+        setLoadingMore(false);
+      }
+    })();
+  }, [index, filter.publishers, filter.categories, filter.types, showExpired, loadedKeys, sorted.length, now, facetSig]);
+
   // 加载更多月份
   const handleLoadMore = useCallback(async () => {
     if (!index) return;
-    const nextKeys = selectNextMonths(index, loadedKeys);
+    const nextKeys = selectNextMonths(index, loadedKeys, now, LOAD_MORE_MONTH_SPAN, showExpired);
     if (nextKeys.length === 0) return;
     setLoadingMore(true);
     try {
@@ -931,14 +1062,13 @@ export default function App() {
     } finally {
       setLoadingMore(false);
     }
-  }, [index, loadedKeys]);
-
+  }, [index, loadedKeys, now, showExpired]);
   const hasMoreMonths = useMemo(() => {
     if (!index) return false;
     const all = listMonthKeys(index).filter((k) => k !== 'rolling');
     const current = monthKeyOf();
-    return all.some((k) => k >= current && !loadedKeys.has(k));
-  }, [index, loadedKeys]);
+    return all.some((k) => (showExpired ? !loadedKeys.has(k) : k >= current && !loadedKeys.has(k)));
+  }, [index, loadedKeys, showExpired]);
 
   // 顶级渲染
   if (phase === 'idle' || phase === 'loading-index') {
@@ -978,7 +1108,15 @@ export default function App() {
               types={typeList}
               journalMeta={journalMeta}
               index={index}
+              showExpired={showExpired}
+              onToggleExpired={() => setShowExpired((v) => !v)}
             />
+            {expansionHint && (
+              <div className="mb-3 text-center text-xs text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900 rounded-lg py-2 px-3">
+                <Sparkles className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
+                {expansionHint}
+              </div>
+            )}
             <ListArea
               records={records}
               filtered={sorted}
@@ -989,6 +1127,10 @@ export default function App() {
               loadingMore={loadingMore}
               hasMoreMonths={hasMoreMonths}
               journalMeta={journalMeta}
+              index={index}
+              activeFacets={{ publishers: filter.publishers, categories: filter.categories, types: filter.types }}
+              showExpired={showExpired}
+              onShowExpired={() => setShowExpired(true)}
             />
             {index && (
               <p className="mt-6 text-center text-xs text-gray-400 dark:text-gray-500">

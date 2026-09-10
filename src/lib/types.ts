@@ -220,6 +220,12 @@ export interface CfpIndex {
   types: FacetCount[];
   /** 月份分片列表（按月份升序） */
   months: MonthShardMeta[];
+  /**
+   * 维度 × 月份计数矩阵（可选，由数据层生成；旧 index.json 无此字段时前端降级为原行为）。
+   * 结构：{ publisher: { "ACS": { "2026-08": 4 } }, category: {...}, type: {...} }。
+   * 用于「筛选感知的月份选择」——根据激活的出版社 / 学科 / 类型，只加载可能含匹配结果的月份分片。
+   */
+  facet_months?: Record<string, Record<string, Record<string, number>>>;
 }
 
 /** 列表排序字段 */
