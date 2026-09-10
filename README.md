@@ -4,18 +4,19 @@ Bilingual (EN/ZH) web app for tracking academic journal **Call for Papers** dead
 
 **🌐 Live site: <https://dodoxxb.github.io/journal-cfp-ddl/>** · Source: <https://github.com/dodoxxb/journal-cfp-ddl>
 
-> **Data snapshot** — generated `2026-09-08` · **63,613** CFPs · **13** publishers · **15** disciplines · 6-month window · 38 monthly shards (28 MB)
+> **Data snapshot** — generated `2026-09-10` · **64,195** CFPs · **13** publishers · **15** disciplines · 6-month window · 38 monthly shards (28 MB)
 
 | | |
 |---|---|
-| Top publishers | MDPI 53,323 (83.8%) · Springer 3,249 (5.1%) · Frontiers 3,063 (4.8%) · Elsevier 2,280 (3.6%) · Nature 999 (1.6%) |
-| Top disciplines | Medicine & Health 18,459 · Computer Science 17,320 · Engineering 10,924 · Life Sciences 4,878 |
-| CFP types | Special Issue 58,067 (91.3%) · Research Topic 4,117 · Collection 999 · Call for Papers 430 |
-| Rolling (no deadline) | 2,235 |
+| Top publishers | MDPI 53,163 (82.8%) · Frontiers 3,696 (5.8%) · Springer 3,261 (5.1%) · Elsevier 2,346 (3.7%) · Nature Portfolio 1,008 (1.6%) |
+| Top disciplines | Medicine & Health 18,713 · Computer Science 17,392 · Engineering 10,953 · Life Sciences 4,974 |
+| CFP types | Special Issue 58,001 (90.3%) · Research Topic 4,750 · Collection 1,008 · Call for Papers 436 |
+| Rolling (no deadline) | 2,978 |
 
 ## Features
 
-- ⚡ **Sharded lazy loading** — the frontend never downloads the full dataset. It fetches `index.json` (≈3 KB) plus the current month and next 2 months on first paint, then appends 2 more months per "load more" click. This replaced an earlier version that fetched a single 108 MB JSON and crashed the tab.
+- ⚡ **Sharded lazy loading** — the frontend never downloads the full dataset. It fetches `index.json` (≈12 KB) plus the current month and next 2 months on first paint, then appends 2 more months per "load more" click. This replaced an earlier version that fetched a single 108 MB JSON and crashed the tab.
+- 🎯 **Facet-aware month expansion** — narrowing by publisher / discipline / type tells the loader *which* months actually hold matches, so niche publishers (a handful of CFPs in total) surface immediately instead of showing an empty first screen. A **"show expired"** toggle makes past months reachable, and an empty result explains *why* it's empty (total count, latest deadline month) with a one-click "show all, including expired".
 - 🔍 **Search** — debounced (250 ms) across title, journal, publisher, category and tags; all tokens must match
 - 🎛️ **Multi-select facets** — publisher, discipline, CFP type, and SJR quartile (Q1–Q4), each with live counts
 - ⏱️ **Time-range filter** — all / 7 days / 30 days / 90 days
