@@ -2,6 +2,8 @@
 
 Bilingual (EN/ZH) web app for tracking academic journal **Call for Papers** deadlines, with SJR quartile / H-index enrichment. Inspired by [ccf-deadlines](https://github.com/ccfddl/ccf-deadlines) and [ShowJCR](https://github.com/HopeGhost/ShowJCR).
 
+**🌐 Live site: <https://dodoxxb.github.io/journal-cfp-ddl/>** · Source: <https://github.com/dodoxxb/journal-cfp-ddl>
+
 > **Data snapshot** — generated `2026-09-08` · **63,613** CFPs · **13** publishers · **15** disciplines · 6-month window · 38 monthly shards (28 MB)
 
 | | |
