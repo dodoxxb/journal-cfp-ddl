@@ -4,6 +4,7 @@
  */
 
 import type {
+  BucketMode,
   CfpFilterState,
   CfpSortField,
   SortDirection,
@@ -13,6 +14,7 @@ import { DEFAULT_FILTER_STATE } from './filters';
 
 const SORT_FIELDS: CfpSortField[] = ['deadline', 'journal', 'publisher'];
 const TIME_RANGES: TimeRange[] = ['all', 'soon', 'month', 'quarter'];
+const BUCKETS: BucketMode[] = ['upcoming', 'rolling'];
 
 /** 拆分逗号分隔的参数值，过滤空串 */
 function parseList(raw: string | null): string[] {
@@ -30,6 +32,7 @@ export function parseFilterState(query: string): CfpFilterState {
   const sortRaw = params.get('sort') as CfpSortField | null;
   const rangeRaw = params.get('range') as TimeRange | null;
   const dirRaw = params.get('dir');
+  const bucketRaw = params.get('bucket') as BucketMode | null;
 
   return {
     search: params.get('q') ?? DEFAULT_FILTER_STATE.search,
@@ -40,6 +43,9 @@ export function parseFilterState(query: string): CfpFilterState {
     range: rangeRaw && TIME_RANGES.includes(rangeRaw) ? rangeRaw : DEFAULT_FILTER_STATE.range,
     sort: sortRaw && SORT_FIELDS.includes(sortRaw) ? sortRaw : DEFAULT_FILTER_STATE.sort,
     dir: dirRaw === 'desc' ? 'desc' : ('asc' as SortDirection),
+    bucket: bucketRaw && BUCKETS.includes(bucketRaw) ? bucketRaw : DEFAULT_FILTER_STATE.bucket,
+    hideMdpiRolling: params.get('nomdpiroll') === '1',
+    balanced: params.get('balanced') === '0' ? false : DEFAULT_FILTER_STATE.balanced,
   };
 }
 
@@ -57,6 +63,9 @@ export function serializeFilterState(state: CfpFilterState): string {
   if (state.range !== 'all') params.set('range', state.range);
   if (state.sort !== 'deadline') params.set('sort', state.sort);
   if (state.dir !== 'asc') params.set('dir', state.dir);
+  if (state.bucket !== 'upcoming') params.set('bucket', state.bucket);
+  if (state.hideMdpiRolling) params.set('nomdpiroll', '1');
+  if (!state.balanced) params.set('balanced', '0');
   return params.toString();
 }
 

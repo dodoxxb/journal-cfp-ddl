@@ -237,6 +237,9 @@ export type SortDirection = 'asc' | 'desc';
 /** 时间范围筛选 */
 export type TimeRange = 'all' | 'soon' | 'month' | 'quarter';
 
+/** 列表桶：即将截稿 / 长期有效（滚动征稿，无截止日） */
+export type BucketMode = 'upcoming' | 'rolling';
+
 /** 前端完整筛选状态（可序列化进 URL query string） */
 export interface CfpFilterState {
   /** 搜索关键词（匹配标题 / 期刊 / 标签 / 出版社 / 学科） */
@@ -255,6 +258,12 @@ export interface CfpFilterState {
   sort: CfpSortField;
   /** 排序方向 */
   dir: SortDirection;
+  /** 列表桶：即将截稿 / 长期有效（滚动征稿）。默认即将截稿 */
+  bucket: BucketMode;
+  /** 隐藏 MDPI 滚动征稿（一键快捷项） */
+  hideMdpiRolling: boolean;
+  /** 是否启用「均衡展示」（按出版社配额打散，对抗 MDPI 占比过高）。默认开启 */
+  balanced: boolean;
 }
 
 /** 数据加载阶段 */

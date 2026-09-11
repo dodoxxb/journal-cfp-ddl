@@ -18,6 +18,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  BarChart3,
+  Bookmark,
   Calendar,
   ChevronLeft,
   ChevronRight,
@@ -25,11 +27,15 @@ import {
   Database,
   Download,
   ExternalLink,
+  EyeOff,
   Filter,
   Flame,
+  Globe,
   Infinity as InfinityIcon,
   Loader2,
   Moon,
+  Save,
+  Scale,
   Search,
   Sparkles,
   Star,
@@ -39,6 +45,7 @@ import {
 } from 'lucide-react';
 
 import type {
+  BucketMode,
   CfpFilterState,
   CfpIndex,
   CfpSortField,
@@ -79,6 +86,18 @@ import { useTheme } from './hooks/useTheme';
 import { useNow } from './hooks/useNow';
 import { useDebounce } from './hooks/useDebounce';
 import { LOAD_MORE_MONTH_SPAN, NOW_TICK_MS, SEARCH_DEBOUNCE_MS } from './lib/constants';
+import { countdownState, isNearDeadline } from './lib/countdown';
+import { deadlineTimeZones, getLocalTimeZone, AOE_HINT } from './lib/timezone';
+import { relativeTime, formatAbsoluteTime } from './lib/relativeTime';
+import { diversifyByPublisher } from './lib/quota';
+import type { SavedView } from './lib/savedViews';
+import {
+  addSavedView,
+  appliedViewName,
+  loadSavedViews,
+  removeSavedView,
+  saveSavedViews,
+} from './lib/savedViews';
 
 // ───────────────────────────────────────────────────────────────────
 // 倒计时颜色策略（urgency 语义）
@@ -118,15 +137,6 @@ const URGENCY_STRIPE: Record<Urgency, string> = {
 
 function urgencyClass(days: number, rolling: boolean): string {
   return URGENCY_TEXT[urgencyOf(days, rolling)];
-}
-
-function formatCountdown(days: number, rolling: boolean): string {
-  if (rolling) return '滚动征稿';
-  if (Number.isNaN(days)) return '待公布';
-  if (days < 0) return `${-days} 天前截止`;
-  if (days === 0) return '今日截止';
-  if (days === 1) return '明天截止';
-  return `还有 ${days} 天`;
 }
 
 function formatDate(iso: string): string {
@@ -197,6 +207,11 @@ interface HeaderProps {
   onExportCurrent: () => void;
   onExportFavorites: () => void;
   currentResultCount: number;
+  now: number;
+  savedViews: SavedView[];
+  onApplyView: (view: SavedView) => void;
+  onDeleteView: (name: string) => void;
+  appliedView: string | null;
 }
 
 function Header({
@@ -209,7 +224,14 @@ function Header({
   onExportCurrent,
   onExportFavorites,
   currentResultCount,
+  now,
+  savedViews,
+  onApplyView,
+  onDeleteView,
+  appliedView,
 }: HeaderProps) {
+  const updatedRelative = index ? relativeTime(Date.parse(index.generated_at), now) : '';
+  const updatedAbsolute = index ? formatAbsoluteTime(index.generated_at) : '';
   return (
     <header className="border-b border-gray-200 dark:border-gray-800 bg-white/85 dark:bg-[#0d1117]/85 backdrop-blur sticky top-0 z-30">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3.5 flex items-center justify-between gap-3">
@@ -223,7 +245,10 @@ function Header({
             </h1>
             {index && (
               <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                数据更新于 {formatDate(index.generated_at)} · 窗口 {index.window_months} 个月 · 共 {index.total.toLocaleString()} 条
+                <span title={updatedAbsolute} className="cursor-help">
+                  数据更新于 {updatedRelative}
+                </span>
+                {' · '}窗口 {index.window_months} 个月 · 共 {index.total.toLocaleString()} 条
               </p>
             )}
           </div>
@@ -247,6 +272,51 @@ function Header({
               </span>
             )}
           </button>
+
+          {/* 已保存视图下拉（竞品均未提供，真空白） */}
+          <details className="relative">
+            <summary
+              className="list-none p-2 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer flex items-center"
+              aria-label="已保存视图"
+              title="已保存视图"
+            >
+              <Bookmark className={`w-4 h-4 ${appliedView ? 'fill-indigo-500 text-indigo-500' : ''}`} />
+            </summary>
+            <div className="absolute right-0 mt-1 w-60 z-40 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#161b22] shadow-lg py-1 text-sm">
+              {savedViews.length === 0 ? (
+                <p className="px-3 py-2 text-gray-500 dark:text-gray-400 text-xs">
+                  暂无保存的视图。在筛选栏点「保存当前视图」即可创建。
+                </p>
+              ) : (
+                savedViews.map((v) => (
+                  <div
+                    key={v.name}
+                    className="flex items-center justify-between gap-2 px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-800"
+                  >
+                    <button
+                      onClick={() => onApplyView(v)}
+                      className={`flex-1 text-left truncate ${
+                        appliedView === v.name
+                          ? 'text-indigo-600 dark:text-indigo-400 font-medium'
+                          : 'text-gray-700 dark:text-gray-200'
+                      }`}
+                      title={appliedView === v.name ? '当前已应用此视图' : `应用视图：${v.name}`}
+                    >
+                      {v.name}
+                    </button>
+                    <button
+                      onClick={() => onDeleteView(v.name)}
+                      className="text-gray-400 hover:text-red-500 dark:hover:text-red-400 shrink-0"
+                      aria-label={`删除视图 ${v.name}`}
+                      title="删除视图"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </details>
 
           {/* ICS 导出（当前结果 / 收藏） */}
           <details className="relative">
@@ -301,26 +371,66 @@ function StatsBar({ stats, index }: { stats: DatasetStats; index: CfpIndex | nul
     { label: '30 天内截止', value: stats.expiringIn30, sub: '近期', tone: 'text-amber-600 dark:text-amber-400', chip: 'bg-amber-100 dark:bg-amber-950/60', Icon: Clock },
     { label: '滚动征稿', value: rollingCount, sub: '长期开放', tone: 'text-purple-600 dark:text-purple-400', chip: 'bg-purple-100 dark:bg-purple-950/60', Icon: InfinityIcon },
   ];
+
+  // 出版社真实占比（透明化：让读者知道分布是真实的，而非被均衡视图掩盖）
+  const pubDist = useMemo(() => {
+    if (!index || index.publishers.length === 0) return [];
+    const total = index.publishers.reduce((s, p) => s + p.count, 0) || 1;
+    return [...index.publishers]
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6)
+      .map((p) => ({ name: p.name, pct: (p.count / total) * 100 }));
+  }, [index]);
+
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3 mb-4">
-      {cards.map((c) => (
-        <div
-          key={c.label}
-          className="bg-white dark:bg-[#161b22] border border-gray-200 dark:border-gray-800 rounded-xl p-3 flex items-center gap-3"
-        >
-          <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${c.chip}`}>
-            <c.Icon className={`w-5 h-5 ${c.tone}`} />
-          </div>
-          <div className="min-w-0">
-            <div className="text-xs text-gray-500 dark:text-gray-400">{c.label}</div>
-            <div className={`text-xl font-semibold leading-tight ${c.tone}`}>
-              {c.value.toLocaleString()}
-              <span className="text-[11px] font-normal text-gray-400 dark:text-gray-500 ml-1">{c.sub}</span>
+    <>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3 mb-4">
+        {cards.map((c) => (
+          <div
+            key={c.label}
+            className="bg-white dark:bg-[#161b22] border border-gray-200 dark:border-gray-800 rounded-xl p-3 flex items-center gap-3"
+          >
+            <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${c.chip}`}>
+              <c.Icon className={`w-5 h-5 ${c.tone}`} />
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs text-gray-500 dark:text-gray-400">{c.label}</div>
+              <div className={`text-xl font-semibold leading-tight ${c.tone}`}>
+                {c.value.toLocaleString()}
+                <span className="text-[11px] font-normal text-gray-400 dark:text-gray-500 ml-1">{c.sub}</span>
+              </div>
             </div>
           </div>
+        ))}
+      </div>
+
+      {pubDist.length > 0 && (
+        <div className="bg-white dark:bg-[#161b22] border border-gray-200 dark:border-gray-800 rounded-xl p-3 mb-4">
+          <div className="flex items-center gap-1.5 mb-2 text-xs text-gray-500 dark:text-gray-400">
+            <BarChart3 className="w-3.5 h-3.5" />
+            全库出版社占比（真实分布，均衡视图不改变此处）
+          </div>
+          <div className="flex h-2.5 w-full rounded-full overflow-hidden bg-gray-100 dark:bg-gray-800">
+            {pubDist.map((p) => (
+              <div
+                key={p.name}
+                className="h-full bg-indigo-500 dark:bg-indigo-400"
+                style={{ width: `${p.pct}%` }}
+                title={`${p.name} ${p.pct.toFixed(1)}%`}
+              />
+            ))}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
+            {pubDist.map((p) => (
+              <span key={p.name} className="inline-flex items-center gap-1">
+                <span className="w-2 h-2 rounded-sm bg-indigo-500 dark:bg-indigo-400" />
+                {p.name} {p.pct.toFixed(1)}%
+              </span>
+            ))}
+          </div>
         </div>
-      ))}
-    </div>
+      )}
+    </>
   );
 }
 
@@ -340,6 +450,11 @@ interface FilterBarProps {
   onToggleExpired: () => void;
   favoritesOnly: boolean;
   onToggleFavoritesOnly: () => void;
+  onSaveView: (name: string) => void;
+  balanced: boolean;
+  onToggleBalanced: () => void;
+  hideMdpiRolling: boolean;
+  onToggleHideMdpiRolling: () => void;
 }
 
 const RANGE_OPTIONS: { value: TimeRange; label: string }[] = [
@@ -355,7 +470,28 @@ const SORT_OPTIONS: { value: CfpSortField; label: string }[] = [
   { value: 'publisher', label: '按出版社' },
 ];
 
-function FilterBar({ filter, setFilter, records, publishers, categories, types, journalMeta, index, showExpired, onToggleExpired, favoritesOnly, onToggleFavoritesOnly }: FilterBarProps) {
+function FilterBar({
+  filter,
+  setFilter,
+  records,
+  publishers,
+  categories,
+  types,
+  journalMeta,
+  index,
+  showExpired,
+  onToggleExpired,
+  favoritesOnly,
+  onToggleFavoritesOnly,
+  onSaveView,
+  balanced,
+  onToggleBalanced,
+  hideMdpiRolling,
+  onToggleHideMdpiRolling,
+}: FilterBarProps) {
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [saveName, setSaveName] = useState('');
+
   // 芯片计数用 index.json 全库统计（稳定、真实），而非已加载子集——
   // 否则未加载月份里的出版社（如 Wiley/ACS）会错误显示 (0)
   const pubCounts = useMemo(() => {
@@ -488,6 +624,84 @@ function FilterBar({ filter, setFilter, records, publishers, categories, types, 
         </div>
       )}
 
+      {/* 保存当前筛选为命名视图（竞品均未提供，真空白）。状态写入 localStorage，可在 Header 下拉切换/删除 */}
+      <div className="flex items-center gap-2">
+        {saveOpen ? (
+          <>
+            <input
+              autoFocus
+              value={saveName}
+              onChange={(e) => setSaveName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  onSaveView(saveName);
+                  setSaveName('');
+                  setSaveOpen(false);
+                }
+                if (e.key === 'Escape') {
+                  setSaveName('');
+                  setSaveOpen(false);
+                }
+              }}
+              placeholder="视图名称…"
+              className="flex-1 py-1.5 px-2.5 bg-gray-50 dark:bg-gray-800/70 border border-gray-200 dark:border-gray-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <button
+              onClick={() => {
+                onSaveView(saveName);
+                setSaveName('');
+                setSaveOpen(false);
+              }}
+              className="py-1.5 px-3 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700"
+            >
+              保存
+            </button>
+            <button
+              onClick={() => {
+                setSaveName('');
+                setSaveOpen(false);
+              }}
+              className="p-1.5 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
+              aria-label="取消保存视图"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </>
+        ) : (
+          <button
+            onClick={() => setSaveOpen(true)}
+            className="flex items-center gap-1.5 py-1.5 px-2.5 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 rounded-lg text-sm hover:bg-gray-100 dark:hover:bg-gray-800"
+          >
+            <Save className="w-3.5 h-3.5" />
+            保存当前视图
+          </button>
+        )}
+      </div>
+
+      {/* 均衡展示开关：开启后按出版社配额打散，对抗 MDPI 占比过高 */}
+      <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={balanced}
+          onChange={onToggleBalanced}
+          className="rounded border-gray-300 dark:border-gray-700 text-indigo-600 focus:ring-indigo-500"
+        />
+        <Scale className="w-3.5 h-3.5 text-indigo-500" />
+        均衡展示（按出版社配额打散，避免 MDPI 刷屏）
+      </label>
+
+      {/* 一键隐藏 MDPI 滚动征稿 */}
+      <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={hideMdpiRolling}
+          onChange={onToggleHideMdpiRolling}
+          className="rounded border-gray-300 dark:border-gray-700 text-indigo-600 focus:ring-indigo-500"
+        />
+        <EyeOff className="w-3.5 h-3.5 text-indigo-500" />
+        隐藏 MDPI 滚动征稿
+      </label>
+
       {/* 显示已过期开关：默认关闭，保持「向前看」；开启后允许加载并展示早于当前月的分片 */}
       <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 cursor-pointer select-none">
         <input
@@ -600,11 +814,13 @@ function MetricBadge({ metric }: { metric?: JournalMetric }) {
 // ───────────────────────────────────────────────────────────────────
 // 子组件：单条 CFP 卡片
 // ───────────────────────────────────────────────────────────────────
-function CFPCard({ record, now, metric, favorite, onToggleFavorite }: { record: CFPRecord; now: number; metric?: JournalMetric; favorite: boolean; onToggleFavorite: (id: string) => void }) {
+function CFPCard({ record, now, metric, favorite, onToggleFavorite, tz }: { record: CFPRecord; now: number; metric?: JournalMetric; favorite: boolean; onToggleFavorite: (id: string) => void; tz: string }) {
   const [expanded, setExpanded] = useState(false);
   const rolling = Boolean(record.rolling);
   const days = daysUntil(record.dt, now);
   const urgency = urgencyOf(days, rolling);
+  const cd = countdownState(record.dt, now, rolling);
+  const tzInfo = deadlineTimeZones(record.dt, record.d, tz);
   const pStyle = publisherStyle(record.p);
   return (
     <article className="relative bg-white dark:bg-[#161b22] border border-gray-200 dark:border-gray-800 rounded-xl overflow-hidden hover:border-indigo-300 dark:hover:border-indigo-700 hover:shadow-md hover:shadow-indigo-500/5 transition-all">
@@ -686,8 +902,8 @@ function CFPCard({ record, now, metric, favorite, onToggleFavorite }: { record: 
           )}
         </div>
 
-        {/* 右侧：收藏星标 + 倒计时胶囊 */}
-        <div className="text-right shrink-0 w-24 sm:w-28 flex flex-col items-end gap-1">
+        {/* 右侧：收藏星标 + 倒计时 + 时区 + CTA */}
+        <div className="text-right shrink-0 w-32 sm:w-40 flex flex-col items-end gap-1">
           <button
             onClick={() => onToggleFavorite(record.id)}
             className={`p-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors ${
@@ -698,17 +914,50 @@ function CFPCard({ record, now, metric, favorite, onToggleFavorite }: { record: 
           >
             <Star className={`w-4 h-4 ${favorite ? 'fill-amber-400 text-amber-400' : ''}`} />
           </button>
-          <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium bg-gray-50 dark:bg-gray-800/80 ${urgencyClass(days, rolling)}`}>
-            {formatCountdown(days, rolling)}
-          </span>
-          <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">
-            {rolling ? '长期开放' : formatDate(record.d)}
+
+          {/* 倒计时：三态粒度 + 等宽数字（tabular-nums 防抖动）+ 无障碍 timer
+              注意：秒级跳动的 near 区域不加 aria-live，避免逐秒播报 */}
+          <div role="timer" aria-atomic="true" aria-roledescription="倒计时" className="flex flex-col items-end">
+            <span
+              className={`inline-block px-2 py-1 rounded-full text-xs font-medium bg-gray-50 dark:bg-gray-800/80 tabular-nums ${urgencyClass(days, rolling)}`}
+            >
+              {cd.text}
+            </span>
+            {/* 文字标签：不依赖颜色即可理解紧迫度 */}
+            <span className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">{cd.label}</span>
           </div>
+
+          {/* 时区说明：AoE（统一标注）+ 用户本地时区对应时间 */}
+          <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 text-right break-words" title={tzInfo?.hint}>
+            {tzInfo ? (
+              <>
+                <div className="flex items-center gap-1 justify-end">
+                  <Globe className="w-3 h-3 shrink-0" />
+                  <span className="tabular-nums">{tzInfo.aoe}</span>
+                </div>
+                <div className="tabular-nums">{tzInfo.local}</div>
+              </>
+            ) : (
+              <span>长期开放（无截止日）</span>
+            )}
+          </div>
+
           {!rolling && record.ad && record.ad !== record.d && (
             <div className="text-[11px] text-gray-400 dark:text-gray-500 mt-0.5">
               摘要 {formatDate(record.ad)}
             </div>
           )}
+
+          {/* CTA：查看征稿详情外链 */}
+          <a
+            href={record.u}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-1 inline-flex items-center gap-1 text-[11px] text-indigo-600 dark:text-indigo-400 hover:underline"
+            title="在出版商官网查看征稿详情"
+          >
+            查看征稿详情 <ExternalLink className="w-3 h-3" />
+          </a>
         </div>
       </div>
     </article>
@@ -803,9 +1052,10 @@ interface ListAreaProps {
   favHint: string | null;
   favorites: Set<string>;
   onToggleFavorite: (id: string) => void;
+  tz: string;
 }
 
-function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMore, loadingMore, hasMoreMonths, journalMeta, index, activeFacets, showExpired, onShowExpired, favoritesOnly, favoritesCount, onLoadFavorites, favHint, favorites, onToggleFavorite }: ListAreaProps) {
+function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMore, loadingMore, hasMoreMonths, journalMeta, index, activeFacets, showExpired, onShowExpired, favoritesOnly, favoritesCount, onLoadFavorites, favHint, favorites, onToggleFavorite, tz }: ListAreaProps) {
   const [page, setPage] = useState(1);
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
 
@@ -958,6 +1208,7 @@ function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMo
               metric={r.is ? journalMeta.get(r.is) : undefined}
               favorite={favorites.has(r.id)}
               onToggleFavorite={onToggleFavorite}
+              tz={tz}
             />
           ))}
       </div>
@@ -1018,18 +1269,80 @@ function ErrorScreen({ error, onRetry }: { error: string; onRetry: () => void })
 }
 
 // ───────────────────────────────────────────────────────────────────
+// 子组件：列表桶分段切换（即将截稿 / 长期有效）
+// ───────────────────────────────────────────────────────────────────
+interface BucketSwitchProps {
+  bucket: BucketMode;
+  onBucket: (b: BucketMode) => void;
+  upcomingCount: number;
+  rollingCount: number;
+}
+
+function BucketSwitch({ bucket, onBucket, upcomingCount, rollingCount }: BucketSwitchProps) {
+  const items: { value: BucketMode; label: string; count: number; Icon: typeof Clock }[] = [
+    { value: 'upcoming', label: '即将截稿', count: upcomingCount, Icon: Clock },
+    { value: 'rolling', label: '长期有效', count: rollingCount, Icon: InfinityIcon },
+  ];
+  return (
+    <div className="flex items-center gap-2 mb-4" role="tablist" aria-label="列表桶切换">
+      <div className="inline-flex rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-[#161b22] p-0.5">
+        {items.map((it) => {
+          const active = bucket === it.value;
+          return (
+            <button
+              key={it.value}
+              role="tab"
+              aria-selected={active}
+              onClick={() => onBucket(it.value)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+                active
+                  ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/25'
+                  : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'
+              }`}
+            >
+              <it.Icon className="w-3.5 h-3.5" />
+              {it.label}
+              <span
+                className={`ml-0.5 px-1.5 py-0.5 rounded-full text-[10px] ${
+                  active ? 'bg-white/20' : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400'
+                }`}
+              >
+                {it.count.toLocaleString()}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <span className="text-xs text-gray-500 dark:text-gray-400 hidden sm:inline">
+        滚动征稿（无截止日）独立成桶，不参与截止日排序
+      </span>
+    </div>
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────
 // 主组件
 // ───────────────────────────────────────────────────────────────────
 export default function App() {
   const { theme, toggleTheme } = useTheme();
-  const now = useNow(NOW_TICK_MS);
+
   const [phase, setPhase] = useState<LoadPhase>('idle');
   const [error, setError] = useState('');
   const [index, setIndex] = useState<CfpIndex | null>(null);
   const [loadedKeys, setLoadedKeys] = useState<Set<string>>(new Set());
   const [records, setRecords] = useState<CFPRecord[]>([]);
+
+  // 是否存在临近（<24h）截止的条目：决定 useNow 是否切到秒级刷新周期（仅近截止才逐秒跳动）
+  // 注意：必须在 records 声明之后，否则 TDZ 报错（Cannot access 'records' before initialization）
+  const isImminent = useMemo(
+    () => records.some((r) => isNearDeadline(r.dt, Date.now(), Boolean(r.rolling))),
+    [records],
+  );
+  const now = useNow(isImminent ? 1000 : NOW_TICK_MS);
   const [journalMeta, setJournalMeta] = useState<Map<string, JournalMetric>>(new Map());
   const [filter, setFilterRaw] = useState<CfpFilterState>(DEFAULT_FILTER_STATE);
+  // 提前声明：保存视图等回调依赖它（放在后面会导致 used before declaration）
+  const setFilter = useCallback((f: CfpFilterState) => setFilterRaw(f), []);
   const [loadingMore, setLoadingMore] = useState(false);
   const initialMount = useRef(true);
 
@@ -1039,6 +1352,25 @@ export default function App() {
   const [focusMonth, setFocusMonth] = useState<string | null>(null);
   const [favHint, setFavHint] = useState<string | null>(null);
   const favLoadingRef = useRef(false);
+
+  // 保存的命名视图（竞品均未提供，真空白）：localStorage 持久化
+  const [savedViews, setSavedViews] = useState<SavedView[]>(() => loadSavedViews());
+  useEffect(() => {
+    saveSavedViews(savedViews);
+  }, [savedViews]);
+  const appliedView = useMemo(() => appliedViewName(savedViews, filter), [savedViews, filter]);
+  const handleSaveView = useCallback(
+    (name: string) => setSavedViews((prev) => addSavedView(prev, name, filter)),
+    [filter],
+  );
+  const handleApplyView = useCallback((v: SavedView) => setFilter({ ...v.state }), [setFilter]);
+  const handleDeleteView = useCallback(
+    (name: string) => setSavedViews((prev) => removeSavedView(prev, name)),
+    [],
+  );
+
+  // 浏览器本地时区（用于截止日本地时间展示）
+  const localTz = useMemo(() => getLocalTimeZone(), []);
 
   // URL → state（首屏）
   useEffect(() => {
@@ -1099,10 +1431,18 @@ export default function App() {
     return () => ctrl.abort();
   }, []);
 
-  const setFilter = useCallback((f: CfpFilterState) => setFilterRaw(f), []);
-
   const filtered = useMemo(() => filterRecords(records, filter, now.getTime(), journalMeta), [records, filter, now, journalMeta]);
   const sorted = useMemo(() => sortRecords(filtered, filter.sort, filter.dir, now.getTime()), [filtered, filter.sort, filter.dir, now]);
+
+  // 均衡视图：按出版社配额打散排序（仅「即将截稿」桶、且开启均衡时生效）
+  const viewSorted = useMemo(() => {
+    if (filter.bucket !== 'upcoming' || !filter.balanced) return sorted;
+    return diversifyByPublisher(sorted, (r) => r.p, (r) => r.dt, {
+      pageSize: PAGE_SIZE,
+      maxFraction: 0.6,
+    });
+  }, [sorted, filter.bucket, filter.balanced]);
+
   const stats = useMemo(() => computeStats(records, index, now.getTime()), [records, index, now]);
 
   // 直方图数据：优先用全量（index.months）或筛选联动后的 facet_months 聚合；
@@ -1135,12 +1475,24 @@ export default function App() {
   );
 
   // 列表展示集：受「只看收藏」与「月份聚焦」约束
+  // 用 viewSorted（均衡视图生效后的顺序）而非 sorted
   const displayed = useMemo(() => {
-    let list = sorted;
+    let list = viewSorted;
     if (favoritesOnly) list = list.filter((r) => favorites.has(r.id));
     if (focusMonth) list = list.filter((r) => (r.d || '').slice(0, 7) === focusMonth);
     return list;
-  }, [sorted, favoritesOnly, favorites, focusMonth]);
+  }, [viewSorted, favoritesOnly, favorites, focusMonth]);
+
+  // 桶计数：必须桶无关（否则切到「即将截稿」后「长期有效」永远显示 0），
+  // 所以分别用 bucket=upcoming / bucket=rolling 各算一次，其余筛选条件保持不变。
+  const upcomingCount = useMemo(
+    () => filterRecords(records, { ...filter, bucket: 'upcoming' }, now.getTime(), journalMeta).length,
+    [records, filter, now, journalMeta],
+  );
+  const rollingCount = useMemo(
+    () => filterRecords(records, { ...filter, bucket: 'rolling' }, now.getTime(), journalMeta).length,
+    [records, filter, now, journalMeta],
+  );
 
   const publisherList = useMemo(() => index?.publishers.map((p) => p.name) ?? [], [index]);
   const categoryList = useMemo(() => index?.categories.map((c) => c.name) ?? [], [index]);
@@ -1386,6 +1738,11 @@ export default function App() {
         onExportCurrent={handleExportCurrent}
         onExportFavorites={handleExportFavorites}
         currentResultCount={displayed.length}
+        now={now.getTime()}
+        savedViews={savedViews}
+        onApplyView={handleApplyView}
+        onDeleteView={handleDeleteView}
+        appliedView={appliedView}
       />
       <main className="max-w-6xl mx-auto px-4 sm:px-6 py-4 sm:py-6">
         {phase === 'loading-shards' && records.length === 0 ? (
@@ -1413,6 +1770,20 @@ export default function App() {
               onToggleExpired={() => setShowExpired((v) => !v)}
               favoritesOnly={favoritesOnly}
               onToggleFavoritesOnly={() => setFavoritesOnly((v) => !v)}
+              onSaveView={handleSaveView}
+              balanced={filter.balanced}
+              onToggleBalanced={() => setFilter({ ...filter, balanced: !filter.balanced })}
+              hideMdpiRolling={filter.hideMdpiRolling}
+              onToggleHideMdpiRolling={() =>
+                setFilter({ ...filter, hideMdpiRolling: !filter.hideMdpiRolling })
+              }
+            />
+
+            <BucketSwitch
+              bucket={filter.bucket}
+              onBucket={(b) => setFilter({ ...filter, bucket: b })}
+              upcomingCount={upcomingCount}
+              rollingCount={rollingCount}
             />
             {expansionHint && (
               <div className="mb-3 text-center text-xs text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900 rounded-lg py-2 px-3">
@@ -1440,6 +1811,7 @@ export default function App() {
               favHint={favHint}
               favorites={favorites}
               onToggleFavorite={toggleFavorite}
+              tz={localTz}
             />
             {index && (
               <p className="mt-6 text-center text-xs text-gray-400 dark:text-gray-500">
@@ -1447,6 +1819,9 @@ export default function App() {
                 全库共 {index.total.toLocaleString()} 条 · 已加载 {records.length.toLocaleString()} 条
                 {index.rolling_count ? ` · 含滚动征稿 ${index.rolling_count.toLocaleString()} 条` : ''}
               </p>
+            )}
+            {index && (
+              <p className="mt-1 text-center text-xs text-gray-400 dark:text-gray-500">{AOE_HINT}</p>
             )}
           </>
         )}

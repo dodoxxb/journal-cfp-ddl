@@ -1,6 +1,6 @@
 # Journal CFP Deadlines 📚
 
-Bilingual (EN/ZH) web app for tracking academic journal **Call for Papers** deadlines, enriched with SJR quartile / H-index metrics. Inspired by [ccf-deadlines](https://github.com/ccfddl/ccf-deadlines) and [ShowJCR](https://github.com/HopeGhost/ShowJCR).
+Bilingual (EN/ZH) web app for tracking academic journal **Call for Papers** deadlines, enriched with SJR quartile / H-index metrics. Inspired by [ccf-deadlines](https://github.com/ccfddl/ccf-deadlines) and [ShowJCR](https://github.com/hitfyd/ShowJCR) (journal quartile / JIF lookup).
 
 **🌐 Live site: <https://dodoxxb.github.io/journal-cfp-ddl/>** · Source: <https://github.com/dodoxxb/journal-cfp-ddl>
 
