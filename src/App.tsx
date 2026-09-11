@@ -23,6 +23,7 @@ import {
   ChevronRight,
   Clock,
   Database,
+  Download,
   ExternalLink,
   Filter,
   Flame,
@@ -31,6 +32,7 @@ import {
   Moon,
   Search,
   Sparkles,
+  Star,
   Sun,
   TrendingUp,
   X,
@@ -57,6 +59,11 @@ import {
   selectMonthsForFacets,
   selectNextMonths,
 } from './lib/dataLoader';
+import { aggregateHistogramCounts } from './lib/histogram';
+import { useFavorites } from './hooks/useFavorites';
+import { generateICS, downloadICS, icsFilename } from './lib/ics';
+import type { IcsEventInput } from './lib/ics';
+import DensityHistogram from './components/DensityHistogram';
 import {
   DEFAULT_FILTER_STATE,
   computeStats,
@@ -184,9 +191,25 @@ interface HeaderProps {
   index: CfpIndex | null;
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
+  favoritesCount: number;
+  favoritesOnly: boolean;
+  onToggleFavoritesOnly: () => void;
+  onExportCurrent: () => void;
+  onExportFavorites: () => void;
+  currentResultCount: number;
 }
 
-function Header({ index, theme, onToggleTheme }: HeaderProps) {
+function Header({
+  index,
+  theme,
+  onToggleTheme,
+  favoritesCount,
+  favoritesOnly,
+  onToggleFavoritesOnly,
+  onExportCurrent,
+  onExportFavorites,
+  currentResultCount,
+}: HeaderProps) {
   return (
     <header className="border-b border-gray-200 dark:border-gray-800 bg-white/85 dark:bg-[#0d1117]/85 backdrop-blur sticky top-0 z-30">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3.5 flex items-center justify-between gap-3">
@@ -205,14 +228,63 @@ function Header({ index, theme, onToggleTheme }: HeaderProps) {
             )}
           </div>
         </div>
-        <button
-          onClick={onToggleTheme}
-          className="p-2 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-          aria-label="切换主题"
-          title={theme === 'dark' ? '切换到浅色' : '切换到深色'}
-        >
-          {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {/* 收藏夹开关 + 角标 */}
+          <button
+            onClick={onToggleFavoritesOnly}
+            className={`relative p-2 rounded-lg border transition-colors ${
+              favoritesOnly
+                ? 'border-amber-400 text-amber-500 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40'
+                : 'border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'
+            }`}
+            aria-label="只看收藏"
+            title={favoritesOnly ? '取消只看收藏' : '只看收藏'}
+          >
+            <Star className={`w-4 h-4 ${favoritesOnly ? 'fill-amber-400 text-amber-400' : ''}`} />
+            {favoritesCount > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-amber-500 text-white text-[10px] font-semibold flex items-center justify-center">
+                {favoritesCount}
+              </span>
+            )}
+          </button>
+
+          {/* ICS 导出（当前结果 / 收藏） */}
+          <details className="relative">
+            <summary
+              className="list-none p-2 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer flex items-center"
+              aria-label="导出日历"
+              title="导出日历（ICS）"
+            >
+              <Download className="w-4 h-4" />
+            </summary>
+            <div className="absolute right-0 mt-1 w-56 z-40 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#161b22] shadow-lg py-1 text-sm">
+              <button
+                onClick={onExportCurrent}
+                className="w-full text-left px-3 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+              >
+                <Download className="w-3.5 h-3.5 text-indigo-500" />
+                导出当前结果（{currentResultCount}）
+              </button>
+              <button
+                onClick={onExportFavorites}
+                className="w-full text-left px-3 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled={favoritesCount === 0}
+              >
+                <Star className="w-3.5 h-3.5 text-amber-500" />
+                导出收藏（{favoritesCount}）
+              </button>
+            </div>
+          </details>
+
+          <button
+            onClick={onToggleTheme}
+            className="p-2 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            aria-label="切换主题"
+            title={theme === 'dark' ? '切换到浅色' : '切换到深色'}
+          >
+            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          </button>
+        </div>
       </div>
     </header>
   );
@@ -266,6 +338,8 @@ interface FilterBarProps {
   index: CfpIndex | null;
   showExpired: boolean;
   onToggleExpired: () => void;
+  favoritesOnly: boolean;
+  onToggleFavoritesOnly: () => void;
 }
 
 const RANGE_OPTIONS: { value: TimeRange; label: string }[] = [
@@ -281,7 +355,7 @@ const SORT_OPTIONS: { value: CfpSortField; label: string }[] = [
   { value: 'publisher', label: '按出版社' },
 ];
 
-function FilterBar({ filter, setFilter, records, publishers, categories, types, journalMeta, index, showExpired, onToggleExpired }: FilterBarProps) {
+function FilterBar({ filter, setFilter, records, publishers, categories, types, journalMeta, index, showExpired, onToggleExpired, favoritesOnly, onToggleFavoritesOnly }: FilterBarProps) {
   // 芯片计数用 index.json 全库统计（稳定、真实），而非已加载子集——
   // 否则未加载月份里的出版社（如 Wiley/ACS）会错误显示 (0)
   const pubCounts = useMemo(() => {
@@ -424,6 +498,17 @@ function FilterBar({ filter, setFilter, records, publishers, categories, types, 
         />
         显示已过期（含早于当前月的分片）
       </label>
+
+      {/* 只看收藏开关：开启后仅展示已收藏条目（收藏可能分布在未加载分片，会自动按需加载） */}
+      <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={favoritesOnly}
+          onChange={onToggleFavoritesOnly}
+          className="rounded border-gray-300 dark:border-gray-700 text-amber-500 focus:ring-amber-500"
+        />
+        只看收藏
+      </label>
     </div>
   );
 }
@@ -515,7 +600,7 @@ function MetricBadge({ metric }: { metric?: JournalMetric }) {
 // ───────────────────────────────────────────────────────────────────
 // 子组件：单条 CFP 卡片
 // ───────────────────────────────────────────────────────────────────
-function CFPCard({ record, now, metric }: { record: CFPRecord; now: number; metric?: JournalMetric }) {
+function CFPCard({ record, now, metric, favorite, onToggleFavorite }: { record: CFPRecord; now: number; metric?: JournalMetric; favorite: boolean; onToggleFavorite: (id: string) => void }) {
   const [expanded, setExpanded] = useState(false);
   const rolling = Boolean(record.rolling);
   const days = daysUntil(record.dt, now);
@@ -601,8 +686,18 @@ function CFPCard({ record, now, metric }: { record: CFPRecord; now: number; metr
           )}
         </div>
 
-        {/* 右侧：倒计时胶囊 */}
-        <div className="text-right shrink-0 w-24 sm:w-28">
+        {/* 右侧：收藏星标 + 倒计时胶囊 */}
+        <div className="text-right shrink-0 w-24 sm:w-28 flex flex-col items-end gap-1">
+          <button
+            onClick={() => onToggleFavorite(record.id)}
+            className={`p-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors ${
+              favorite ? 'text-amber-500' : 'text-gray-400 dark:text-gray-500'
+            }`}
+            aria-label={favorite ? '取消收藏' : '收藏'}
+            title={favorite ? '取消收藏' : '收藏'}
+          >
+            <Star className={`w-4 h-4 ${favorite ? 'fill-amber-400 text-amber-400' : ''}`} />
+          </button>
           <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium bg-gray-50 dark:bg-gray-800/80 ${urgencyClass(days, rolling)}`}>
             {formatCountdown(days, rolling)}
           </span>
@@ -702,9 +797,15 @@ interface ListAreaProps {
   activeFacets: { publishers: string[]; categories: string[]; types: string[] };
   showExpired: boolean;
   onShowExpired: () => void;
+  favoritesOnly: boolean;
+  favoritesCount: number;
+  onLoadFavorites: () => void;
+  favHint: string | null;
+  favorites: Set<string>;
+  onToggleFavorite: (id: string) => void;
 }
 
-function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMore, loadingMore, hasMoreMonths, journalMeta, index, activeFacets, showExpired, onShowExpired }: ListAreaProps) {
+function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMore, loadingMore, hasMoreMonths, journalMeta, index, activeFacets, showExpired, onShowExpired, favoritesOnly, favoritesCount, onLoadFavorites, favHint, favorites, onToggleFavorite }: ListAreaProps) {
   const [page, setPage] = useState(1);
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
 
@@ -768,6 +869,33 @@ function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMo
     );
   }
   if (filtered.length === 0) {
+    // 收藏夹为空状态（友好提示 + 引导加载未加载分片里的收藏）
+    if (favoritesOnly) {
+      if (favoritesCount === 0) {
+        return (
+          <div className="text-center py-12 text-gray-500 dark:text-gray-400">
+            <Star className="w-6 h-6 mx-auto mb-2 opacity-50" />
+            <p>还没有收藏任何 CFP</p>
+            <p className="text-xs mt-1">点击卡片右上角的星标即可收藏，方便以后在这里快速查看</p>
+          </div>
+        );
+      }
+      return (
+        <div className="text-center py-12 text-gray-500 dark:text-gray-400">
+          <Star className="w-6 h-6 mx-auto mb-2 opacity-50" />
+          <p>已收藏的 {favoritesCount} 条里，有一部分还在未加载的月份分片中</p>
+          <button
+            onClick={onLoadFavorites}
+            disabled={loadingMore}
+            className="mt-3 px-4 py-2 text-sm bg-amber-500 text-white rounded-lg hover:bg-amber-600 disabled:opacity-50 inline-flex items-center gap-2"
+          >
+            {loadingMore && <Loader2 className="w-4 h-4 animate-spin" />}
+            {loadingMore ? '加载中…' : '加载收藏所在月份'}
+          </button>
+          {favHint && <p className="text-xs mt-2 text-amber-600 dark:text-amber-400">{favHint}</p>}
+        </div>
+      );
+    }
     if (expiredInfo && expiredInfo.total > 0) {
       return (
         <div className="text-center py-12 text-gray-500 dark:text-gray-400">
@@ -822,9 +950,16 @@ function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMo
         {totalPages > 1 && <span>第 {safePage} / {totalPages} 页</span>}
       </div>
       <div className="space-y-2">
-        {visible.map((r) => (
-          <CFPCard key={r.id} record={r} now={now} metric={r.is ? journalMeta.get(r.is) : undefined} />
-        ))}
+          {visible.map((r) => (
+            <CFPCard
+              key={r.id}
+              record={r}
+              now={now}
+              metric={r.is ? journalMeta.get(r.is) : undefined}
+              favorite={favorites.has(r.id)}
+              onToggleFavorite={onToggleFavorite}
+            />
+          ))}
       </div>
 
       {/* 末页且还有未加载月份 → 提供加载更多分片入口 */}
@@ -898,6 +1033,13 @@ export default function App() {
   const [loadingMore, setLoadingMore] = useState(false);
   const initialMount = useRef(true);
 
+  // 收藏夹（localStorage 持久化）
+  const { favorites, count: favCount, toggle: toggleFavorite } = useFavorites();
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [focusMonth, setFocusMonth] = useState<string | null>(null);
+  const [favHint, setFavHint] = useState<string | null>(null);
+  const favLoadingRef = useRef(false);
+
   // URL → state（首屏）
   useEffect(() => {
     setFilterRaw(parseFilterState(window.location.search));
@@ -962,6 +1104,43 @@ export default function App() {
   const filtered = useMemo(() => filterRecords(records, filter, now.getTime(), journalMeta), [records, filter, now, journalMeta]);
   const sorted = useMemo(() => sortRecords(filtered, filter.sort, filter.dir, now.getTime()), [filtered, filter.sort, filter.dir, now]);
   const stats = useMemo(() => computeStats(records, index, now.getTime()), [records, index, now]);
+
+  // 直方图数据：优先用全量（index.months）或筛选联动后的 facet_months 聚合；
+  // 过滤掉非月份键（如 'rolling'），并标记已加载 / 已过期 / 当前月。
+  const histData = useMemo(() => {
+    if (!index) return [];
+    const counts = aggregateHistogramCounts(index, {
+      publishers: filter.publishers,
+      categories: filter.categories,
+      types: filter.types,
+    });
+    const full = new Map<string, number>();
+    for (const m of index.months) full.set(m.name, m.count);
+    const effective = counts ?? full;
+    const current = monthKeyOf(now);
+    return index.months
+      .filter((m) => /^\d{4}-\d{2}$/.test(m.name))
+      .map((m) => ({
+        month: m.name,
+        count: effective.get(m.name) ?? 0,
+        loaded: loadedKeys.has(m.name),
+        expired: m.name < current,
+        isCurrent: m.name === current,
+      }));
+  }, [index, filter.publishers, filter.categories, filter.types, loadedKeys, now]);
+
+  const histFiltered = useMemo(
+    () => filter.publishers.length > 0 || filter.categories.length > 0 || filter.types.length > 0,
+    [filter.publishers, filter.categories, filter.types],
+  );
+
+  // 列表展示集：受「只看收藏」与「月份聚焦」约束
+  const displayed = useMemo(() => {
+    let list = sorted;
+    if (favoritesOnly) list = list.filter((r) => favorites.has(r.id));
+    if (focusMonth) list = list.filter((r) => (r.d || '').slice(0, 7) === focusMonth);
+    return list;
+  }, [sorted, favoritesOnly, favorites, focusMonth]);
 
   const publisherList = useMemo(() => index?.publishers.map((p) => p.name) ?? [], [index]);
   const categoryList = useMemo(() => index?.categories.map((c) => c.name) ?? [], [index]);
@@ -1043,6 +1222,45 @@ export default function App() {
     })();
   }, [index, filter.publishers, filter.categories, filter.types, showExpired, loadedKeys, sorted.length, now, facetSig]);
 
+  // 收藏夹自动扩展：开启「只看收藏」后，若仍有收藏 id 不在已加载记录里，
+  // 自动分批加载（含已过期）月份分片，直到全部收藏命中或数据窗口耗尽。
+  useEffect(() => {
+    if (!favoritesOnly || !index) {
+      setFavHint(null);
+      return;
+    }
+    const allLoaded = [...favorites].every((id) => records.some((r) => r.id === id));
+    if (allLoaded) {
+      setFavHint(null);
+      return;
+    }
+    const remaining = [...favorites].filter((id) => !records.some((r) => r.id === id)).length;
+    const targets = selectNextMonths(index, loadedKeys, now, LOAD_MORE_MONTH_SPAN, true).filter(
+      (k) => !loadedKeys.has(k),
+    );
+    if (targets.length === 0) {
+      setFavHint(`还有 ${remaining} 条收藏位于当前数据窗口之外，无法自动加载`);
+      return;
+    }
+    if (favLoadingRef.current) return;
+    favLoadingRef.current = true;
+    setLoadingMore(true);
+    (async () => {
+      try {
+        const more = await Promise.all(targets.map(async (k) => [k, await loadShard(index, k)] as const));
+        setRecords((prev) => [...prev, ...more.flatMap(([, recs]) => recs)]);
+        setLoadedKeys((prev) => {
+          const n = new Set(prev);
+          targets.forEach((k) => n.add(k));
+          return n;
+        });
+      } finally {
+        setLoadingMore(false);
+        favLoadingRef.current = false;
+      }
+    })();
+  }, [favoritesOnly, index, favorites, records, loadedKeys, now]);
+
   // 加载更多月份
   const handleLoadMore = useCallback(async () => {
     if (!index) return;
@@ -1063,6 +1281,72 @@ export default function App() {
       setLoadingMore(false);
     }
   }, [index, loadedKeys, now, showExpired]);
+
+  // CFPRecord -> ICS 输入
+  const toIcsInput = useCallback((r: CFPRecord): IcsEventInput => ({
+    id: r.id,
+    title: r.t,
+    journal: r.j,
+    publisher: r.p,
+    url: r.u,
+    deadline: r.d,
+    rolling: r.rolling,
+  }), []);
+
+  // 导出「当前结果」（受筛选 + 收藏 + 月份聚焦约束后的可见列表）
+  const handleExportCurrent = useCallback(() => {
+    downloadICS(icsFilename(), generateICS(displayed.map(toIcsInput)));
+  }, [displayed, toIcsInput]);
+
+  // 导出「收藏」（当前已加载记录里被收藏的条目；rolling/无截止日自动跳过）
+  const handleExportFavorites = useCallback(() => {
+    const list = records.filter((r) => favorites.has(r.id)).map(toIcsInput);
+    downloadICS(icsFilename(), generateICS(list));
+  }, [records, favorites, toIcsInput]);
+
+  // 点击直方图柱子：未加载则加载该月分片，并把列表筛选/滚动到该月
+  const handleSelectMonth = useCallback(async (month: string) => {
+    if (!index) return;
+    if (!loadedKeys.has(month)) {
+      setLoadingMore(true);
+      try {
+        const recs = await loadShard(index, month);
+        setRecords((prev) => [...prev, ...recs]);
+        setLoadedKeys((prev) => new Set(prev).add(month));
+      } finally {
+        setLoadingMore(false);
+      }
+    }
+    setFocusMonth(month);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [index, loadedKeys]);
+
+  const clearFocusMonth = useCallback(() => setFocusMonth(null), []);
+
+  // 手动触发「加载收藏所在月份」（自动扩展之外的加速入口；按 id 去重避免重复追加）
+  const handleLoadFavorites = useCallback(async () => {
+    if (!index) return;
+    const targets = selectNextMonths(index, loadedKeys, now, LOAD_MORE_MONTH_SPAN, true).filter(
+      (k) => !loadedKeys.has(k),
+    );
+    if (targets.length === 0) return;
+    setLoadingMore(true);
+    try {
+      const more = await Promise.all(targets.map(async (k) => [k, await loadShard(index, k)] as const));
+      const incoming = more.flatMap(([, recs]) => recs);
+      setRecords((prev) => {
+        const seen = new Set(prev.map((r) => r.id));
+        return [...prev, ...incoming.filter((r) => !seen.has(r.id))];
+      });
+      setLoadedKeys((prev) => {
+        const n = new Set(prev);
+        targets.forEach((k) => n.add(k));
+        return n;
+      });
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [index, loadedKeys, now]);
   const hasMoreMonths = useMemo(() => {
     if (!index) return false;
     const all = listMonthKeys(index).filter((k) => k !== 'rolling');
@@ -1092,13 +1376,30 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-[#0d1117] text-gray-900 dark:text-gray-100">
-      <Header index={index} theme={theme} onToggleTheme={toggleTheme} />
+      <Header
+        index={index}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        favoritesCount={favCount}
+        favoritesOnly={favoritesOnly}
+        onToggleFavoritesOnly={() => setFavoritesOnly((v) => !v)}
+        onExportCurrent={handleExportCurrent}
+        onExportFavorites={handleExportFavorites}
+        currentResultCount={displayed.length}
+      />
       <main className="max-w-6xl mx-auto px-4 sm:px-6 py-4 sm:py-6">
         {phase === 'loading-shards' && records.length === 0 ? (
           <LoadingScreen message={`加载 ${selectInitialMonths(index!).length} 个月份分片…`} />
         ) : (
           <>
             <StatsBar stats={stats} index={index} />
+            <DensityHistogram
+              data={histData}
+              filtered={histFiltered}
+              focusMonth={focusMonth}
+              onSelectMonth={handleSelectMonth}
+              onClearFocus={clearFocusMonth}
+            />
             <FilterBar
               filter={filter}
               setFilter={setFilter}
@@ -1110,6 +1411,8 @@ export default function App() {
               index={index}
               showExpired={showExpired}
               onToggleExpired={() => setShowExpired((v) => !v)}
+              favoritesOnly={favoritesOnly}
+              onToggleFavoritesOnly={() => setFavoritesOnly((v) => !v)}
             />
             {expansionHint && (
               <div className="mb-3 text-center text-xs text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900 rounded-lg py-2 px-3">
@@ -1119,7 +1422,7 @@ export default function App() {
             )}
             <ListArea
               records={records}
-              filtered={sorted}
+              filtered={displayed}
               now={now.getTime()}
               hasFilter={hasAnyFilter(filter)}
               filterSignature={filterSignature}
@@ -1131,6 +1434,12 @@ export default function App() {
               activeFacets={{ publishers: filter.publishers, categories: filter.categories, types: filter.types }}
               showExpired={showExpired}
               onShowExpired={() => setShowExpired(true)}
+              favoritesOnly={favoritesOnly}
+              favoritesCount={favCount}
+              onLoadFavorites={handleLoadFavorites}
+              favHint={favHint}
+              favorites={favorites}
+              onToggleFavorite={toggleFavorite}
             />
             {index && (
               <p className="mt-6 text-center text-xs text-gray-400 dark:text-gray-500">
