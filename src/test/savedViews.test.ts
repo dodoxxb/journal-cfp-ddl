@@ -42,6 +42,7 @@ const baseState: CfpFilterState = {
   types: [],
   quartiles: [],
   range: 'all',
+  customDays: 30,
   sort: 'deadline',
   dir: 'asc',
   bucket: 'upcoming',

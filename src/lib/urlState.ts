@@ -10,11 +10,18 @@ import type {
   SortDirection,
   TimeRange,
 } from './types';
-import { DEFAULT_FILTER_STATE } from './filters';
+import { DEFAULT_FILTER_STATE, normalizeCustomDays } from './filters';
 
 const SORT_FIELDS: CfpSortField[] = ['deadline', 'journal', 'publisher'];
-const TIME_RANGES: TimeRange[] = ['all', 'soon', 'month', 'quarter'];
+const TIME_RANGES: TimeRange[] = ['all', 'soon', 'month', 'quarter', 'custom'];
 const BUCKETS: BucketMode[] = ['upcoming', 'rolling'];
+
+/** 解析「N 天内」的 N；缺失或非法时回退默认 30 */
+function parseCustomDays(raw: string | null): number {
+  if (!raw) return DEFAULT_FILTER_STATE.customDays;
+  const n = Number.parseInt(raw, 10);
+  return Number.isNaN(n) ? DEFAULT_FILTER_STATE.customDays : normalizeCustomDays(n);
+}
 
 /** 拆分逗号分隔的参数值，过滤空串 */
 function parseList(raw: string | null): string[] {
@@ -41,6 +48,7 @@ export function parseFilterState(query: string): CfpFilterState {
     types: parseList(params.get('ty')),
     quartiles: parseList(params.get('sjrq')),
     range: rangeRaw && TIME_RANGES.includes(rangeRaw) ? rangeRaw : DEFAULT_FILTER_STATE.range,
+    customDays: parseCustomDays(params.get('days')),
     sort: sortRaw && SORT_FIELDS.includes(sortRaw) ? sortRaw : DEFAULT_FILTER_STATE.sort,
     dir: dirRaw === 'desc' ? 'desc' : ('asc' as SortDirection),
     bucket: bucketRaw && BUCKETS.includes(bucketRaw) ? bucketRaw : DEFAULT_FILTER_STATE.bucket,
@@ -61,6 +69,7 @@ export function serializeFilterState(state: CfpFilterState): string {
   if (state.types.length) params.set('ty', state.types.join(','));
   if (state.quartiles.length) params.set('sjrq', state.quartiles.join(','));
   if (state.range !== 'all') params.set('range', state.range);
+  if (state.range === 'custom') params.set('days', String(state.customDays));
   if (state.sort !== 'deadline') params.set('sort', state.sort);
   if (state.dir !== 'asc') params.set('dir', state.dir);
   if (state.bucket !== 'upcoming') params.set('bucket', state.bucket);

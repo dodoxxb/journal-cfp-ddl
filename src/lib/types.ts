@@ -234,8 +234,11 @@ export type CfpSortField = 'deadline' | 'journal' | 'publisher';
 /** 排序方向 */
 export type SortDirection = 'asc' | 'desc';
 
-/** 时间范围筛选 */
-export type TimeRange = 'all' | 'soon' | 'month' | 'quarter';
+/**
+ * 时间范围筛选。
+ * `custom` 为「N 天内」，具体天数见 `CfpFilterState.customDays`。
+ */
+export type TimeRange = 'all' | 'soon' | 'month' | 'quarter' | 'custom';
 
 /** 列表桶：即将截稿 / 长期有效（滚动征稿，无截止日） */
 export type BucketMode = 'upcoming' | 'rolling';
@@ -254,6 +257,8 @@ export interface CfpFilterState {
   quartiles: string[];
   /** 时间范围 */
   range: TimeRange;
+  /** `range === 'custom'` 时的天数 N（「N 天内」）。1–3650，缺省 30 */
+  customDays: number;
   /** 排序字段 */
   sort: CfpSortField;
   /** 排序方向 */

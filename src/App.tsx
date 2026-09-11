@@ -22,6 +22,7 @@ import {
   BarChart3,
   Bookmark,
   Calendar,
+  CalendarDays,
   ChevronLeft,
   ChevronRight,
   Clock,
@@ -33,6 +34,7 @@ import {
   Flame,
   Globe,
   Infinity as InfinityIcon,
+  Keyboard,
   LayoutGrid,
   LayoutList,
   Loader2,
@@ -75,6 +77,7 @@ import { useFavorites } from './hooks/useFavorites';
 import { generateICS, downloadICS, icsFilename } from './lib/ics';
 import type { IcsEventInput } from './lib/ics';
 import DensityHistogram from './components/DensityHistogram';
+import MonthCalendar from './components/MonthCalendar';
 import {
   DEFAULT_FILTER_STATE,
   computeStats,
@@ -82,6 +85,9 @@ import {
   daysUntil,
   filterRecords,
   liveFacetCounts,
+  normalizeCustomDays,
+  CUSTOM_DAYS_MAX,
+  CUSTOM_DAYS_MIN,
   hasAnyFilter,
   sortRecords,
 } from './lib/filters';
@@ -89,6 +95,7 @@ import { parseFilterState, serializeFilterState } from './lib/urlState';
 import { useTheme } from './hooks/useTheme';
 import { useNow } from './hooks/useNow';
 import { useDebounce } from './hooks/useDebounce';
+import { SHORTCUT_HELP, useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { LOAD_MORE_MONTH_SPAN, NOW_TICK_MS, SEARCH_DEBOUNCE_MS } from './lib/constants';
 import { countdownState, isNearDeadline } from './lib/countdown';
 import { deadlineTimeZones, getLocalTimeZone, AOE_HINT } from './lib/timezone';
@@ -109,19 +116,42 @@ import {
 // 倒计时颜色策略（urgency 语义）
 // ───────────────────────────────────────────────────────────────────
 
-type Urgency = 'rolling' | 'na' | 'expired' | 'critical' | 'soon' | 'month' | 'later';
+/**
+ * 紧迫度档位（P1-2：从 7 档收敛为语义 4 档 + 2 个非语义态）。
+ *
+ * 4 个语义档：critical ≤7 天 / soon ≤30 天 / later >30 天 / expired 已截止
+ * 2 个非语义态：rolling（滚动征稿，无截止日）/ na（日期缺失）
+ *
+ * 原来 critical(≤3) 与 soon(≤7) 两档在视觉上几乎不可分（红 vs 橙），
+ * 但认知上要记两套含义，合并为「≤7 天 = 紧急」后可读性更好。
+ */
+type Urgency = 'rolling' | 'na' | 'expired' | 'critical' | 'soon' | 'later';
 
-/** 列表呈现方式：卡片（信息全）或紧凑行（密度高） */
-type ViewMode = 'card' | 'row';
+/** 语义档的中文标签，供无障碍与 tooltip 使用 */
+const URGENCY_LABEL: Record<Urgency, string> = {
+  rolling: '滚动征稿',
+  na: '日期未知',
+  expired: '已截止',
+  critical: '紧急（7 天内）',
+  soon: '临近（30 天内）',
+  later: '充裕（30 天以上）',
+};
+
+/** 列表呈现方式：卡片（信息全）/ 紧凑行（密度高）/ 日历（月历副视图，P2-1） */
+type ViewMode = 'card' | 'row' | 'cal';
 const VIEW_MODE_KEY = 'journal-cfp-ddl:view';
+
+/** 把 localStorage 里的字符串收敛为合法 ViewMode */
+function parseViewMode(raw: string | null): ViewMode {
+  return raw === 'row' || raw === 'cal' ? raw : 'card';
+}
 
 function urgencyOf(days: number, rolling: boolean): Urgency {
   if (rolling) return 'rolling';
   if (Number.isNaN(days)) return 'na';
   if (days < 0) return 'expired';
-  if (days <= 3) return 'critical';
-  if (days <= 7) return 'soon';
-  if (days <= 30) return 'month';
+  if (days <= 7) return 'critical';
+  if (days <= 30) return 'soon';
   return 'later';
 }
 
@@ -130,8 +160,7 @@ const URGENCY_TEXT: Record<Urgency, string> = {
   na: 'text-gray-500 dark:text-gray-400',
   expired: 'text-gray-400 dark:text-gray-500 line-through',
   critical: 'text-red-600 dark:text-red-400 font-semibold',
-  soon: 'text-orange-600 dark:text-orange-400 font-medium',
-  month: 'text-amber-600 dark:text-amber-400',
+  soon: 'text-amber-700 dark:text-amber-400 font-medium',
   later: 'text-emerald-700 dark:text-emerald-400',
 };
 
@@ -140,8 +169,7 @@ const URGENCY_STRIPE: Record<Urgency, string> = {
   na: 'bg-gray-300 dark:bg-gray-700',
   expired: 'bg-gray-300 dark:bg-gray-700',
   critical: 'bg-red-500',
-  soon: 'bg-orange-500',
-  month: 'bg-amber-500',
+  soon: 'bg-amber-500',
   later: 'bg-emerald-500',
 };
 
@@ -226,6 +254,17 @@ interface HeaderProps {
   onToggleSkin: () => void;
 }
 
+/**
+ * 全站 iCal 订阅源的绝对地址（P2-2）。
+ * 源文件由 `scripts/build_site_data.py` 在构建期预生成到 `public/data/cfp.ics`，
+ * 内容为未来 180 天内截止的条目（上限 3000 条）。
+ */
+function absoluteIcsUrl(): string {
+  const base = import.meta.env.BASE_URL || '/';
+  const origin = typeof window === 'undefined' ? '' : window.location.origin;
+  return `${origin}${base.endsWith('/') ? base : `${base}/`}data/cfp.ics`;
+}
+
 function Header({
   index,
   theme,
@@ -246,6 +285,9 @@ function Header({
 }: HeaderProps) {
   const updatedRelative = index ? relativeTime(Date.parse(index.generated_at), now) : '';
   const updatedAbsolute = index ? formatAbsoluteTime(index.generated_at) : '';
+  // P2-2：订阅源地址在浏览器端按当前站点根拼接，webcal:// 交给日历客户端
+  const icsUrl = absoluteIcsUrl();
+  const subscribeUrl = icsUrl.replace(/^https?:/, 'webcal:');
   return (
     <header className="border-b border-gray-200 dark:border-gray-800 bg-white/85 dark:bg-[#0d1117]/85 backdrop-blur sticky top-0 z-30">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3.5 flex items-center justify-between gap-3">
@@ -368,6 +410,23 @@ function Header({
                 <Star className="w-3.5 h-3.5 text-amber-500" />
                 导出收藏（{favoritesCount}）
               </button>
+              {/* P2-2：构建期预生成的全站订阅源（未来 180 天 / 3000 条上限） */}
+              <a
+                href={subscribeUrl}
+                className="w-full text-left px-3 py-2 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2 border-t border-gray-100 dark:border-gray-800"
+                title="用日历客户端订阅，截止日自动同步更新"
+              >
+                <Calendar className="w-3.5 h-3.5 text-emerald-500" />
+                订阅全站日历（webcal）
+              </a>
+              <a
+                href={icsUrl}
+                download="journal-cfp-deadlines.ics"
+                className="w-full text-left px-3 py-2 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+              >
+                <Download className="w-3.5 h-3.5" />
+                下载 .ics 文件（1.3MB）
+              </a>
             </div>
           </details>
 
@@ -487,6 +546,7 @@ const RANGE_OPTIONS: { value: TimeRange; label: string }[] = [
   { value: 'soon', label: '7 天内' },
   { value: 'month', label: '30 天内' },
   { value: 'quarter', label: '90 天内' },
+  { value: 'custom', label: '自定义 N 天…' },
 ];
 
 const SORT_OPTIONS: { value: CfpSortField; label: string }[] = [
@@ -522,6 +582,7 @@ function SearchToolbar({
         <div className="relative flex-1">
           <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
+            id="cfp-search"
             type="text"
             value={filter.search}
             onChange={(e) => setFilter({ ...filter, search: e.target.value })}
@@ -548,6 +609,26 @@ function SearchToolbar({
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
         </select>
+        {/* P1-6：自定义「N 天内」——匹配「我还有 6 周能写完」这类真实诉求 */}
+        {filter.range === 'custom' && (
+          <div className="flex items-center gap-1.5 shrink-0">
+            <input
+              type="number"
+              min={CUSTOM_DAYS_MIN}
+              max={CUSTOM_DAYS_MAX}
+              value={filter.customDays}
+              onChange={(e) =>
+                setFilter({ ...filter, customDays: normalizeCustomDays(e.target.valueAsNumber) })
+              }
+              onBlur={(e) =>
+                setFilter({ ...filter, customDays: normalizeCustomDays(e.target.valueAsNumber) })
+              }
+              aria-label="自定义天数"
+              className="w-20 py-2 px-2.5 bg-gray-50 dark:bg-gray-800/70 border border-gray-200 dark:border-gray-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <span className="text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap">天内</span>
+          </div>
+        )}
         <select
           value={filter.sort}
           onChange={(e) => setFilter({ ...filter, sort: e.target.value as CfpSortField })}
@@ -810,6 +891,49 @@ function FacetSidebar({ open, children }: { open: boolean; children: ReactNode }
   );
 }
 
+/** 快捷键帮助浮层（P2-3）：按 `?` 打开，`Esc` 或点击遮罩关闭 */
+function ShortcutHelp({ onClose }: { onClose: () => void }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+      onClick={onClose}
+      role="presentation"
+    >
+      <div
+        className="w-full max-w-sm bg-white dark:bg-[#161b22] border border-gray-200 dark:border-gray-800 rounded-xl shadow-xl p-5"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="键盘快捷键"
+      >
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">键盘快捷键</h2>
+          <button
+            onClick={onClose}
+            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800"
+            aria-label="关闭"
+          >
+            <X className="w-4 h-4 text-gray-500" />
+          </button>
+        </div>
+        <ul className="space-y-1.5">
+          {SHORTCUT_HELP.map((s) => (
+            <li key={s.keys} className="flex items-center justify-between gap-4 text-sm">
+              <span className="text-gray-600 dark:text-gray-300">{s.desc}</span>
+              <kbd className="shrink-0 px-2 py-0.5 rounded border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800 text-xs font-mono text-gray-700 dark:text-gray-200">
+                {s.keys}
+              </kbd>
+            </li>
+          ))}
+        </ul>
+        <p className="mt-3 text-xs text-gray-400 dark:text-gray-500">
+          在输入框中打字时快捷键自动失效。
+        </p>
+      </div>
+    </div>
+  );
+}
+
 interface ChipGroupProps {
   title: string;
   options: string[];
@@ -913,7 +1037,11 @@ function CFPCard({ record, now, metric, favorite, onToggleFavorite, tz }: { reco
   return (
     <article className="relative bg-white dark:bg-[#161b22] border border-gray-200 dark:border-gray-800 rounded-xl overflow-hidden hover:border-indigo-300 dark:hover:border-indigo-700 hover:shadow-md hover:shadow-indigo-500/5 transition-all">
       {/* 左侧紧迫度色条 */}
-      <span className={`absolute left-0 top-0 bottom-0 w-1 ${URGENCY_STRIPE[urgency]}`} aria-hidden />
+      <span
+        className={`absolute left-0 top-0 bottom-0 w-1 ${URGENCY_STRIPE[urgency]}`}
+        title={URGENCY_LABEL[urgency]}
+        aria-label={URGENCY_LABEL[urgency]}
+      />
       <div className="p-3 sm:p-4 pl-4 sm:pl-5 flex items-start gap-3">
         {/* 期刊头像 */}
         <div
@@ -1081,7 +1209,11 @@ function CFPRow({
 
   return (
     <div className="relative flex items-center gap-2 pl-3 pr-2 py-2 border-b border-gray-100 dark:border-gray-800/70 hover:bg-indigo-50/60 dark:hover:bg-indigo-950/20 transition-colors group">
-      <span className={`absolute left-0 top-0 bottom-0 w-0.5 ${URGENCY_STRIPE[urgency]}`} aria-hidden />
+      <span
+        className={`absolute left-0 top-0 bottom-0 w-0.5 ${URGENCY_STRIPE[urgency]}`}
+        title={URGENCY_LABEL[urgency]}
+        aria-label={URGENCY_LABEL[urgency]}
+      />
 
       <button
         onClick={() => onToggleFavorite(record.id)}
@@ -1240,10 +1372,12 @@ interface ListAreaProps {
   tz: string;
   /** 列表呈现方式：卡片（信息全）或紧凑行（密度高） */
   viewMode: ViewMode;
+  /** 当前页码（提升到 App，供键盘快捷键 ← → 使用） */
+  page: number;
+  setPage: (p: number) => void;
 }
 
-function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMore, loadingMore, hasMoreMonths, journalMeta, index, activeFacets, showExpired, onShowExpired, favoritesOnly, favoritesCount, onLoadFavorites, favHint, favorites, onToggleFavorite, tz, viewMode }: ListAreaProps) {
-  const [page, setPage] = useState(1);
+function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMore, loadingMore, hasMoreMonths, journalMeta, index, activeFacets, showExpired, onShowExpired, favoritesOnly, favoritesCount, onLoadFavorites, favHint, favorites, onToggleFavorite, tz, viewMode, page, setPage }: ListAreaProps) {
   const pageSize = viewMode === 'row' ? PAGE_SIZE_ROW : PAGE_SIZE;
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
 
@@ -1254,7 +1388,7 @@ function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMo
       prevSig.current = filterSignature;
       setPage(1);
     }
-  }, [filterSignature]);
+  }, [filterSignature, setPage]);
 
   const safePage = Math.min(page, totalPages);
   const visible = useMemo(
@@ -1266,7 +1400,7 @@ function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMo
   const goto = useCallback((p: number) => {
     setPage(Math.min(Math.max(1, p), totalPages));
     window.scrollTo({ top: 0, behavior: 'smooth' });
-  }, [totalPages]);
+  }, [totalPages, setPage]);
 
   // 解释性空状态：某筛选维度下确有数据，但全部位于已过期（早于当前月）月份。
   // 此时给出总条数 + 最近截止月份，并提供「查看全部（含已过期）」按钮，
@@ -1595,7 +1729,7 @@ export default function App() {
   // 列表视图模式（紧凑行 / 卡片），localStorage 持久化
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     try {
-      return localStorage.getItem(VIEW_MODE_KEY) === 'row' ? 'row' : 'card';
+      return parseViewMode(localStorage.getItem(VIEW_MODE_KEY));
     } catch {
       return 'card';
     }
@@ -1610,6 +1744,10 @@ export default function App() {
 
   // 窄屏分面面板展开状态（宽屏始终常驻，此状态不生效）
   const [facetOpen, setFacetOpen] = useState(false);
+
+  // P2-1：月历里选中的某一天（YYYY-MM-DD），为空表示不按天过滤
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+
 
   // URL → state（首屏）
   useEffect(() => {
@@ -1719,8 +1857,32 @@ export default function App() {
     let list = viewSorted;
     if (favoritesOnly) list = list.filter((r) => favorites.has(r.id));
     if (focusMonth) list = list.filter((r) => (r.d || '').slice(0, 7) === focusMonth);
+    if (selectedDay) list = list.filter((r) => (r.d || '').slice(0, 10) === selectedDay);
     return list;
-  }, [viewSorted, favoritesOnly, favorites, focusMonth]);
+  }, [viewSorted, favoritesOnly, favorites, focusMonth, selectedDay]);
+
+  // 翻页状态提升到 App，以便键盘快捷键 ← / → 直接跳页
+  const [page, setPage] = useState(1);
+  const pageSize = viewMode === 'row' ? PAGE_SIZE_ROW : PAGE_SIZE;
+  const totalPages = Math.max(1, Math.ceil(displayed.length / pageSize));
+
+  // ── P2-3 键盘快捷键 ────────────────────────────────────────────────
+  // 注意：必须放在 totalPages 声明之后，否则闭包引用会触发 TDZ 运行时崩溃。
+  const { helpOpen, setHelpOpen } = useKeyboardShortcuts({
+    onFocusSearch: () => {
+      const el = document.getElementById('cfp-search');
+      if (el instanceof HTMLInputElement) {
+        el.focus();
+        el.select();
+      }
+    },
+    onToggleFavorites: () => setFavoritesOnly((v) => !v),
+    onScrollTop: () => window.scrollTo({ top: 0, behavior: 'smooth' }),
+    onPrevPage: () => setPage((p) => Math.max(1, p - 1)),
+    onNextPage: () => setPage((p) => Math.min(totalPages, p + 1)),
+    // v 在三种视图间循环：紧凑 → 卡片 → 日历 → 紧凑
+    onToggleView: () => setViewMode((v) => (v === 'row' ? 'card' : v === 'card' ? 'cal' : 'row')),
+  });
 
   // 桶计数：必须桶无关（否则切到「即将截稿」后「长期有效」永远显示 0），
   // 所以分别用 bucket=upcoming / bucket=rolling 各算一次，其余筛选条件保持不变。
@@ -2051,10 +2213,11 @@ export default function App() {
               >
                 {(
                   [
-                    { value: 'row' as ViewMode, label: '紧凑', Icon: LayoutList },
-                    { value: 'card' as ViewMode, label: '卡片', Icon: LayoutGrid },
+                    { value: 'row' as ViewMode, label: '紧凑', Icon: LayoutList, tip: '紧凑行：同屏约 12 条，适合扫读' },
+                    { value: 'card' as ViewMode, label: '卡片', Icon: LayoutGrid, tip: '卡片：信息完整，适合细看' },
+                    { value: 'cal' as ViewMode, label: '日历', Icon: CalendarDays, tip: '月历：看哪天有截止，可点选某一天' },
                   ]
-                ).map(({ value, label, Icon }) => {
+                ).map(({ value, label, Icon, tip }) => {
                   const active = viewMode === value;
                   return (
                     <button
@@ -2062,7 +2225,7 @@ export default function App() {
                       type="button"
                       aria-pressed={active}
                       onClick={() => setViewMode(value)}
-                      title={value === 'row' ? '紧凑行：同屏约 12 条，适合扫读' : '卡片：信息完整，适合细看'}
+                      title={tip}
                       className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md text-sm transition-colors ${
                         active
                           ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/25'
@@ -2081,6 +2244,15 @@ export default function App() {
                     <Sparkles className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
                     {expansionHint}
                   </div>
+                )}
+                {/* P2-1：月历副视图。选中某天后下方列表自动收敛到那一天 */}
+                {viewMode === 'cal' && (
+                  <MonthCalendar
+                    records={displayed}
+                    now={now.getTime()}
+                    selectedDay={selectedDay}
+                    onSelectDay={setSelectedDay}
+                  />
                 )}
                 <ListArea
                   records={records}
@@ -2104,6 +2276,8 @@ export default function App() {
                   onToggleFavorite={toggleFavorite}
                   tz={localTz}
                   viewMode={viewMode}
+                  page={page}
+                  setPage={setPage}
                 />
                 {index && (
                   <p className="mt-6 text-center text-xs text-gray-400 dark:text-gray-500">
@@ -2115,11 +2289,16 @@ export default function App() {
                 {index && (
                   <p className="mt-1 text-center text-xs text-gray-400 dark:text-gray-500">{AOE_HINT}</p>
                 )}
+                <p className="mt-2 text-center text-xs text-gray-400 dark:text-gray-500">
+                  <Keyboard className="w-3 h-3 inline mr-1 -mt-0.5" />
+                  按 <kbd className="px-1 rounded border border-gray-300 dark:border-gray-600">?</kbd> 查看键盘快捷键
+                </p>
               </div>
             </div>
           </>
         )}
       </main>
+      {helpOpen && <ShortcutHelp onClose={() => setHelpOpen(false)} />}
     </div>
   );
 }
