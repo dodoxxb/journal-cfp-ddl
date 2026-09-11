@@ -23,6 +23,7 @@ import {
   Bookmark,
   Calendar,
   CalendarDays,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock,
@@ -144,6 +145,32 @@ const VIEW_MODE_KEY = 'journal-cfp-ddl:view';
 /** 把 localStorage 里的字符串收敛为合法 ViewMode */
 function parseViewMode(raw: string | null): ViewMode {
   return raw === 'row' || raw === 'cal' ? raw : 'card';
+}
+
+/** 出版社占比面板是否展开 */
+const PREF_PUB_DIST = 'journal-cfp-ddl:pubdist';
+/** 列表里「已过期」分组是否展开 */
+const PREF_EXPIRED_OPEN = 'journal-cfp-ddl:expired-open';
+
+/**
+ * 读取布尔型界面偏好。localStorage 在隐私模式下可能不可读/不可写，
+ * 这里的读写全部包了 try-catch，失败时静默回退默认值。
+ */
+function loadPref(key: string, fallback: boolean): boolean {
+  try {
+    const v = localStorage.getItem(key);
+    return v === null ? fallback : v === '1';
+  } catch {
+    return fallback;
+  }
+}
+
+function savePref(key: string, value: boolean): void {
+  try {
+    localStorage.setItem(key, value ? '1' : '0');
+  } catch {
+    /* 隐私模式下不可写，忽略即可 */
+  }
 }
 
 function urgencyOf(days: number, rolling: boolean): Urgency {
@@ -456,6 +483,15 @@ function StatsBar({ stats, index }: { stats: DatasetStats; index: CfpIndex | nul
     { label: '滚动征稿', value: rollingCount, sub: '长期开放', tone: 'text-purple-600 dark:text-purple-400', chip: 'bg-purple-100 dark:bg-purple-950/60', Icon: InfinityIcon },
   ];
 
+  // 出版社占比默认折叠：它是"看一眼就好"的元信息，不是日常浏览需要的。
+  // 折叠态只留一条摘要（头部出版社 + 占比），想细看再点开，偏好持久化。
+  const [distOpen, setDistOpen] = useState(
+    () => loadPref(PREF_PUB_DIST, false),
+  );
+  useEffect(() => {
+    savePref(PREF_PUB_DIST, distOpen);
+  }, [distOpen]);
+
   // 出版社真实占比（透明化：让读者知道分布是真实的，而非被均衡视图掩盖）
   const pubDist = useMemo(() => {
     if (!index || index.publishers.length === 0) return [];
@@ -489,29 +525,52 @@ function StatsBar({ stats, index }: { stats: DatasetStats; index: CfpIndex | nul
       </div>
 
       {pubDist.length > 0 && (
-        <div className="bg-white dark:bg-[#161b22] border border-gray-200 dark:border-gray-800 rounded-xl p-3 mb-4">
-          <div className="flex items-center gap-1.5 mb-2 text-xs text-gray-500 dark:text-gray-400">
-            <BarChart3 className="w-3.5 h-3.5" />
-            全库出版社占比（真实分布，均衡视图不改变此处）
-          </div>
-          <div className="flex h-2.5 w-full rounded-full overflow-hidden bg-gray-100 dark:bg-gray-800">
-            {pubDist.map((p) => (
-              <div
-                key={p.name}
-                className="h-full bg-indigo-500 dark:bg-indigo-400"
-                style={{ width: `${p.pct}%` }}
-                title={`${p.name} ${p.pct.toFixed(1)}%`}
-              />
-            ))}
-          </div>
-          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
-            {pubDist.map((p) => (
-              <span key={p.name} className="inline-flex items-center gap-1">
-                <span className="w-2 h-2 rounded-sm bg-indigo-500 dark:bg-indigo-400" />
-                {p.name} {p.pct.toFixed(1)}%
-              </span>
-            ))}
-          </div>
+        <div className="bg-white dark:bg-[#161b22] border border-gray-200 dark:border-gray-800 rounded-xl mb-4">
+          <button
+            onClick={() => setDistOpen((v) => !v)}
+            aria-expanded={distOpen}
+            className="w-full flex items-center gap-1.5 px-3 py-2 text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors"
+            title={distOpen ? '收起出版社占比' : '展开出版社占比'}
+          >
+            <BarChart3 className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">
+              全库出版社占比
+              {!distOpen && pubDist[0] && (
+                <span className="ml-1 text-gray-400 dark:text-gray-500">
+                  · {pubDist[0].name} {pubDist[0].pct.toFixed(1)}%
+                </span>
+              )}
+            </span>
+            <ChevronDown
+              className={`w-3.5 h-3.5 ml-auto shrink-0 transition-transform ${distOpen ? 'rotate-180' : ''}`}
+            />
+          </button>
+
+          {distOpen && (
+            <div className="px-3 pb-3">
+              <div className="flex h-2.5 w-full rounded-full overflow-hidden bg-gray-100 dark:bg-gray-800">
+                {pubDist.map((p) => (
+                  <div
+                    key={p.name}
+                    className="h-full bg-indigo-500 dark:bg-indigo-400"
+                    style={{ width: `${p.pct}%` }}
+                    title={`${p.name} ${p.pct.toFixed(1)}%`}
+                  />
+                ))}
+              </div>
+              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-gray-500 dark:text-gray-400">
+                {pubDist.map((p) => (
+                  <span key={p.name} className="inline-flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-sm bg-indigo-500 dark:bg-indigo-400" />
+                    {p.name} {p.pct.toFixed(1)}%
+                  </span>
+                ))}
+              </div>
+              <p className="mt-2 text-[11px] text-gray-400 dark:text-gray-500">
+                这是全库真实分布，均衡视图只改变排序，不改变此处数字。
+              </p>
+            </div>
+          )}
         </div>
       )}
     </>
@@ -1379,7 +1438,34 @@ interface ListAreaProps {
 
 function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMore, loadingMore, hasMoreMonths, journalMeta, index, activeFacets, showExpired, onShowExpired, favoritesOnly, favoritesCount, onLoadFavorites, favHint, favorites, onToggleFavorite, tz, viewMode, page, setPage }: ListAreaProps) {
   const pageSize = viewMode === 'row' ? PAGE_SIZE_ROW : PAGE_SIZE;
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+
+  // P0-3：把已过期的条目从主列表里分出来，默认折叠。
+  // 用户来这里是「看还能投什么」，已过期的应该让路，但不能消失——
+  // 所以单独成组、默认收起、条数可见，想看一眼就点开。
+  const { activeAll, expiredAll } = useMemo(() => {
+    const active: CFPRecord[] = [];
+    const expired: CFPRecord[] = [];
+    for (const r of filtered) {
+      if (r.rolling) {
+        active.push(r);
+        continue;
+      }
+      const d = daysUntil(r.dt, now);
+      if (!Number.isNaN(d) && d < 0) expired.push(r);
+      else active.push(r);
+    }
+    return { activeAll: active, expiredAll: expired };
+  }, [filtered, now]);
+
+  const [expiredOpen, setExpiredOpen] = useState(() => loadPref(PREF_EXPIRED_OPEN, false));
+  useEffect(() => {
+    savePref(PREF_EXPIRED_OPEN, expiredOpen);
+  }, [expiredOpen]);
+  // 全部结果都是已过期时强制展开，避免「有 N 条却一片空白」
+  const expiredShown = expiredOpen || activeAll.length === 0;
+
+  // 分页只按未过期条目计算，已过期走下方折叠区
+  const totalPages = Math.max(1, Math.ceil(activeAll.length / pageSize));
 
   // 筛选条件变化时回到第一页（加载更多月份不重置）
   const prevSig = useRef(filterSignature);
@@ -1392,10 +1478,13 @@ function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMo
 
   const safePage = Math.min(page, totalPages);
   const visible = useMemo(
-    () => filtered.slice((safePage - 1) * pageSize, safePage * pageSize),
-    [filtered, safePage, pageSize],
+    () => activeAll.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [activeAll, safePage, pageSize],
   );
   const onLastPage = safePage >= totalPages;
+
+  // 折叠区最多先渲染 20 条，避免一次铺开上千条把页面拖垮
+  const expiredPreview = expiredShown ? expiredAll.slice(0, 20) : [];
 
   const goto = useCallback((p: number) => {
     setPage(Math.min(Math.max(1, p), totalPages));
@@ -1518,7 +1607,12 @@ function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMo
   return (
     <>
       <div className="text-xs text-gray-500 dark:text-gray-400 mb-2 px-1 flex items-center justify-between">
-        <span>共 {filtered.length.toLocaleString()} 条匹配</span>
+        <span>
+          共 {activeAll.length.toLocaleString()} 条可投
+          {expiredAll.length > 0 && (
+            <span className="text-gray-400 dark:text-gray-500">（另有 {expiredAll.length.toLocaleString()} 条已截止）</span>
+          )}
+        </span>
         {totalPages > 1 && <span>第 {safePage} / {totalPages} 页</span>}
       </div>
       {viewMode === 'row' ? (
@@ -1558,6 +1652,55 @@ function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMo
               tz={tz}
             />
           ))}
+        </div>
+      )}
+
+      {/* P0-3：已过期分组，默认折叠 */}
+      {expiredAll.length > 0 && (
+        <div className="mt-3 border border-gray-200 dark:border-gray-800 rounded-lg bg-white/60 dark:bg-[#161b22]/60 overflow-hidden">
+          <button
+            onClick={() => setExpiredOpen((v) => !v)}
+            aria-expanded={expiredShown}
+            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
+          >
+            <Clock className="w-3.5 h-3.5 shrink-0" />
+            已截止 {expiredAll.length.toLocaleString()} 条
+            <ChevronDown
+              className={`w-3.5 h-3.5 ml-auto shrink-0 transition-transform ${expiredShown ? 'rotate-180' : ''}`}
+            />
+          </button>
+          {expiredShown && (
+            <div className="border-t border-gray-200 dark:border-gray-800">
+              {expiredPreview.map((r) =>
+                viewMode === 'row' ? (
+                  <CFPRow
+                    key={r.id}
+                    record={r}
+                    now={now}
+                    metric={r.is ? journalMeta.get(r.is) : undefined}
+                    favorite={favorites.has(r.id)}
+                    onToggleFavorite={onToggleFavorite}
+                  />
+                ) : (
+                  <CFPCard
+                    key={r.id}
+                    record={r}
+                    now={now}
+                    metric={r.is ? journalMeta.get(r.is) : undefined}
+                    favorite={favorites.has(r.id)}
+                    onToggleFavorite={onToggleFavorite}
+                    tz={tz}
+                  />
+                ),
+              )}
+              {expiredAll.length > expiredPreview.length && (
+                <p className="px-3 py-2 text-[11px] text-gray-400 dark:text-gray-500">
+                  仅显示最近 {expiredPreview.length} 条，共 {expiredAll.length.toLocaleString()} 条。
+                  需要更多请配合筛选条件缩小范围。
+                </p>
+              )}
+            </div>
+          )}
         </div>
       )}
 

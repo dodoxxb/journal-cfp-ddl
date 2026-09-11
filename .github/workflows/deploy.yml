@@ -1,0 +1,71 @@
+name: Deploy to GitHub Pages
+
+# 说明：本仓库的数据生成是**本地手动流程**，不在 CI 执行。原因有三：
+#   1. 数据湖 data/cfp_by_publisher/ 已在 .gitignore 排除，CI 爬取结果无法持久化；
+#   2. MDPI / Wiley 必须有头浏览器人工过 Cloudflare / Akamai 挑战，headless CI 无法完成；
+#   3. public/data/ 分片是已治理产物，需人工确认后再提交。
+# 正确流程：本地爬 → 本地治理 → python scripts/build_site_data.py --window 6
+#          → git add public/data/ && git push（本工作流随后自动构建部署）
+#
+# 前端质量门禁（lint / tsc / test）由 frontend-ci.yml 负责。
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Verify shipped data is present
+      run: |
+        test -f public/data/index.json || { echo "::error::public/data/index.json 缺失，请先在本地运行 build_site_data.py 并提交产物"; exit 1; }
+        test -d public/data/shards || { echo "::error::public/data/shards/ 缺失"; exit 1; }
+        echo "分片数量: $(ls public/data/shards | wc -l)"
+
+    - name: Build production bundle
+      run: npm run build
+
+    - name: Setup Pages
+      uses: actions/configure-pages@v4
+
+    - name: Upload artifact
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: dist/
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request'
+
+    steps:
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v4
