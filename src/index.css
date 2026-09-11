@@ -87,6 +87,149 @@
   }
 }
 
+/* ==========================================================================
+   minimal 皮肤 —— 苹果级极简
+   通过根节点 data-skin="minimal" 生效，与 rich 共用同一份 JSX。
+   设计要点：无阴影、无渐变、发丝级分隔线、单色化、留白更大、系统字体优先。
+   ========================================================================== */
+
+[data-skin='minimal'] {
+  --hairline: rgba(0, 0, 0, 0.08);
+  --wash: rgba(0, 0, 0, 0.025);
+}
+.dark [data-skin='minimal'] {
+  --hairline: rgba(255, 255, 255, 0.1);
+  --wash: rgba(255, 255, 255, 0.03);
+}
+
+/* 字体：优先系统字体（Apple 设备上是 SF），字距略收 */
+[data-skin='minimal'],
+[data-skin='minimal'] * {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'Inter', system-ui,
+    sans-serif;
+  letter-spacing: -0.006em;
+}
+
+/* 1. 抹平一切阴影（包括 hover 抬升） */
+[data-skin='minimal'] *,
+[data-skin='minimal'] *:hover,
+[data-skin='minimal'] *:focus,
+[data-skin='minimal'] *:focus-visible {
+  box-shadow: none !important;
+}
+
+/* 2. 抹平渐变，改为中性深色 */
+[data-skin='minimal'] [class*='bg-gradient-to'] {
+  background-image: none !important;
+  background-color: rgb(30 41 59) !important;
+}
+.dark [data-skin='minimal'] [class*='bg-gradient-to'] {
+  background-color: rgb(71 85 105) !important;
+}
+
+/* 3. 卡片 → 扁平 + 发丝分隔线（不再有边框/圆角/白底） */
+[data-skin='minimal'] article {
+  border: 0 !important;
+  border-bottom: 1px solid var(--hairline) !important;
+  border-radius: 0 !important;
+  background-color: transparent !important;
+}
+[data-skin='minimal'] article:hover {
+  background-color: var(--wash) !important;
+}
+
+/* 4. 圆角统一收敛为苹果常用的 10px */
+[data-skin='minimal'] .rounded-xl,
+[data-skin='minimal'] .rounded-lg,
+[data-skin='minimal'] .rounded-md,
+[data-skin='minimal'] .rounded-2xl {
+  border-radius: 10px !important;
+}
+
+/* 5. 紧迫度色条：更细 + 去饱和（保留语义色但降低喧嚣） */
+[data-skin='minimal'] span[aria-hidden][class*='absolute'] {
+  width: 2px !important;
+  filter: saturate(0.4);
+}
+
+/* 6. 留白：列表纵向间距加大，呼吸感更强 */
+[data-skin='minimal'] .space-y-2 > * + * {
+  margin-top: 0 !important;
+}
+[data-skin='minimal'] main {
+  max-width: 72rem;
+}
+[data-skin='minimal'] article > div {
+  padding-top: 0.875rem !important;
+  padding-bottom: 0.875rem !important;
+}
+
+/* 7. 正文与辅助文字：略放大、提对比 */
+[data-skin='minimal'] .text-xs {
+  font-size: 0.78rem !important;
+}
+[data-skin='minimal'] .text-\[11px\] {
+  font-size: 0.72rem !important;
+}
+
+/* 8. 顶栏：去掉下边框，改为更透的毛玻璃 */
+[data-skin='minimal'] header {
+  border-bottom-color: var(--hairline) !important;
+  background-color: rgba(255, 255, 255, 0.72) !important;
+}
+.dark [data-skin='minimal'] header {
+  background-color: rgba(13, 17, 23, 0.72) !important;
+}
+
+/* 9. 主按钮 / 选中态：苹果蓝实心，无渐无影 */
+[data-skin='minimal'] button[class*='bg-indigo-600'],
+[data-skin='minimal'] a[class*='bg-indigo-600'] {
+  background-color: rgb(0 122 255) !important;
+  border-color: rgb(0 122 255) !important;
+}
+
+/* 10. 面板容器（统计 / 直方图 / 筛选 / 分面栏）：去掉白底与深灰边框，
+      改由留白和发丝线划分，而不是"贴一张白卡片" */
+[data-skin='minimal'] main .rounded-xl,
+[data-skin='minimal'] main .rounded-2xl {
+  border-color: var(--hairline) !important;
+  background-color: transparent !important;
+}
+[data-skin='minimal'] main .rounded-lg,
+[data-skin='minimal'] main .rounded-md {
+  border-color: var(--hairline) !important;
+}
+
+/* 11. 分面栏：右侧一条发丝竖线做分栏，取消卡片感 */
+[data-skin='minimal'] aside > div {
+  border: 0 !important;
+  background-color: transparent !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+[data-skin='minimal'] aside {
+  border-right: 1px solid var(--hairline);
+  padding-right: 1.25rem !important;
+}
+
+/* 12. 分组标题：小号大写字距（Apple 设置页的 section header 观感） */
+[data-skin='minimal'] aside .text-xs.font-medium {
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-size: 0.68rem !important;
+  font-weight: 600;
+  color: rgb(134 142 150);
+  margin-bottom: 0.45rem !important;
+}
+.dark [data-skin='minimal'] aside .text-xs.font-medium {
+  color: rgb(110 118 129);
+}
+
+/* 13. 筛选芯片：未选中去掉实边框，只留一层极淡描边 */
+[data-skin='minimal'] button.rounded-full {
+  border-color: var(--hairline) !important;
+}
+
 @layer utilities {
   .text-balance {
     text-wrap: balance;

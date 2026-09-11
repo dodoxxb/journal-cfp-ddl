@@ -17,6 +17,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   BarChart3,
   Bookmark,
@@ -32,8 +33,11 @@ import {
   Flame,
   Globe,
   Infinity as InfinityIcon,
+  LayoutGrid,
+  LayoutList,
   Loader2,
   Moon,
+  Palette,
   Save,
   Scale,
   Search,
@@ -76,8 +80,8 @@ import {
   computeStats,
   countActiveFilters,
   daysUntil,
-  facetQuartileCounts,
   filterRecords,
+  liveFacetCounts,
   hasAnyFilter,
   sortRecords,
 } from './lib/filters';
@@ -89,6 +93,8 @@ import { LOAD_MORE_MONTH_SPAN, NOW_TICK_MS, SEARCH_DEBOUNCE_MS } from './lib/con
 import { countdownState, isNearDeadline } from './lib/countdown';
 import { deadlineTimeZones, getLocalTimeZone, AOE_HINT } from './lib/timezone';
 import { relativeTime, formatAbsoluteTime } from './lib/relativeTime';
+import { loadSkin, saveSkin, SKIN_LABELS } from './lib/skin';
+import type { Skin } from './lib/skin';
 import { diversifyByPublisher } from './lib/quota';
 import type { SavedView } from './lib/savedViews';
 import {
@@ -104,6 +110,10 @@ import {
 // ───────────────────────────────────────────────────────────────────
 
 type Urgency = 'rolling' | 'na' | 'expired' | 'critical' | 'soon' | 'month' | 'later';
+
+/** 列表呈现方式：卡片（信息全）或紧凑行（密度高） */
+type ViewMode = 'card' | 'row';
+const VIEW_MODE_KEY = 'journal-cfp-ddl:view';
 
 function urgencyOf(days: number, rolling: boolean): Urgency {
   if (rolling) return 'rolling';
@@ -212,6 +222,8 @@ interface HeaderProps {
   onApplyView: (view: SavedView) => void;
   onDeleteView: (name: string) => void;
   appliedView: string | null;
+  skin: Skin;
+  onToggleSkin: () => void;
 }
 
 function Header({
@@ -229,6 +241,8 @@ function Header({
   onApplyView,
   onDeleteView,
   appliedView,
+  skin,
+  onToggleSkin,
 }: HeaderProps) {
   const updatedRelative = index ? relativeTime(Date.parse(index.generated_at), now) : '';
   const updatedAbsolute = index ? formatAbsoluteTime(index.generated_at) : '';
@@ -254,6 +268,17 @@ function Header({
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {/* 皮肤切换：精致 / 简约（两套视觉语言，同一套功能） */}
+          <button
+            onClick={onToggleSkin}
+            className="p-2 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors flex items-center gap-1"
+            aria-label={`切换皮肤，当前：${SKIN_LABELS[skin].name}`}
+            title={`皮肤：${SKIN_LABELS[skin].name} —— ${SKIN_LABELS[skin].hint}（点击切换）`}
+          >
+            <Palette className="w-4 h-4" />
+            <span className="hidden sm:inline text-xs">{SKIN_LABELS[skin].name}</span>
+          </button>
+
           {/* 收藏夹开关 + 角标 */}
           <button
             onClick={onToggleFavoritesOnly}
@@ -445,7 +470,7 @@ interface FilterBarProps {
   categories: string[];
   types: string[];
   journalMeta: Map<string, JournalMetric>;
-  index: CfpIndex | null;
+  nowMs: number;
   showExpired: boolean;
   onToggleExpired: () => void;
   favoritesOnly: boolean;
@@ -470,59 +495,29 @@ const SORT_OPTIONS: { value: CfpSortField; label: string }[] = [
   { value: 'publisher', label: '按出版社' },
 ];
 
-function FilterBar({
+
+interface SearchToolbarProps {
+  filter: CfpFilterState;
+  setFilter: (f: CfpFilterState) => void;
+  activeCount: number;
+  facetOpen: boolean;
+  onToggleFacetOpen: () => void;
+}
+
+/**
+ * 顶部工具条：搜索 + 时间范围 + 排序 + 升降序。
+ * 窄屏（<lg）额外提供「筛选」按钮展开分面面板；宽屏分面常驻左侧，按钮隐藏。
+ */
+function SearchToolbar({
   filter,
   setFilter,
-  records,
-  publishers,
-  categories,
-  types,
-  journalMeta,
-  index,
-  showExpired,
-  onToggleExpired,
-  favoritesOnly,
-  onToggleFavoritesOnly,
-  onSaveView,
-  balanced,
-  onToggleBalanced,
-  hideMdpiRolling,
-  onToggleHideMdpiRolling,
-}: FilterBarProps) {
-  const [saveOpen, setSaveOpen] = useState(false);
-  const [saveName, setSaveName] = useState('');
-
-  // 芯片计数用 index.json 全库统计（稳定、真实），而非已加载子集——
-  // 否则未加载月份里的出版社（如 Wiley/ACS）会错误显示 (0)
-  const pubCounts = useMemo(() => {
-    const m = new Map<string, number>();
-    index?.publishers.forEach((p) => m.set(p.name, p.count));
-    return m;
-  }, [index]);
-  const catCounts = useMemo(() => {
-    const m = new Map<string, number>();
-    index?.categories.forEach((c) => m.set(c.name, c.count));
-    return m;
-  }, [index]);
-  const tyCounts = useMemo(() => {
-    const m = new Map<string, number>();
-    index?.types.forEach((t) => m.set(t.name, t.count));
-    return m;
-  }, [index]);
-  const qCounts = useMemo(() => facetQuartileCounts(records, journalMeta), [records, journalMeta]);
-
-  const toggle = (key: 'publishers' | 'categories' | 'types' | 'quartiles', value: string) => {
-    const cur = filter[key];
-    const next = cur.includes(value) ? cur.filter((v) => v !== value) : [...cur, value];
-    setFilter({ ...filter, [key]: next });
-  };
-
-  const activeCount = countActiveFilters(filter);
+  activeCount,
+  facetOpen,
+  onToggleFacetOpen,
+}: SearchToolbarProps) {
   const hasSearch = filter.search.trim().length > 0;
-
   return (
-    <div className="bg-white dark:bg-[#161b22] border border-gray-200 dark:border-gray-800 rounded-xl p-3 sm:p-4 mb-4 space-y-3 shadow-sm">
-      {/* 搜索框 + 时间范围 */}
+    <div className="bg-white dark:bg-[#161b22] border border-gray-200 dark:border-gray-800 rounded-xl p-3 sm:p-4 mb-4 shadow-sm">
       <div className="flex gap-2 flex-col sm:flex-row">
         <div className="relative flex-1">
           <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -547,6 +542,7 @@ function FilterBar({
           value={filter.range}
           onChange={(e) => setFilter({ ...filter, range: e.target.value as TimeRange })}
           className="py-2 px-3 bg-gray-50 dark:bg-gray-800/70 border border-gray-200 dark:border-gray-700 rounded-lg text-sm"
+          aria-label="时间范围"
         >
           {RANGE_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
@@ -556,6 +552,7 @@ function FilterBar({
           value={filter.sort}
           onChange={(e) => setFilter({ ...filter, sort: e.target.value as CfpSortField })}
           className="py-2 px-3 bg-gray-50 dark:bg-gray-800/70 border border-gray-200 dark:border-gray-700 rounded-lg text-sm"
+          aria-label="排序字段"
         >
           {SORT_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
@@ -568,15 +565,80 @@ function FilterBar({
         >
           {filter.dir === 'asc' ? '↑' : '↓'}
         </button>
+        <button
+          onClick={onToggleFacetOpen}
+          aria-expanded={facetOpen}
+          className="lg:hidden flex items-center justify-center gap-1.5 py-2 px-3 bg-gray-50 dark:bg-gray-800/70 border border-gray-200 dark:border-gray-700 rounded-lg text-sm hover:bg-gray-100 dark:hover:bg-gray-700"
+        >
+          <Filter className="w-3.5 h-3.5" />
+          筛选
+          {activeCount > 0 && (
+            <span className="ml-0.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-indigo-600 text-white text-[11px] font-medium">
+              {activeCount}
+            </span>
+          )}
+        </button>
       </div>
+    </div>
+  );
+}
 
+function FilterBar({
+  filter,
+  setFilter,
+  records,
+  publishers,
+  categories,
+  types,
+  journalMeta,
+  nowMs,
+  showExpired,
+  onToggleExpired,
+  favoritesOnly,
+  onToggleFavoritesOnly,
+  onSaveView,
+  balanced,
+  onToggleBalanced,
+  hideMdpiRolling,
+  onToggleHideMdpiRolling,
+}: FilterBarProps) {
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [saveName, setSaveName] = useState('');
+
+  // 分面计数口径统一（P1-3）：每组计数 = 在「除本组外所有条件」下的命中数，
+  // 也就是「点下去会得到几条」。四组共用一个口径，杜绝点进去 0 条的死路。
+  const live = useMemo(
+    () => liveFacetCounts(records, filter, nowMs, journalMeta),
+    [records, filter, nowMs, journalMeta],
+  );
+
+  const toggle = (key: 'publishers' | 'categories' | 'types' | 'quartiles', value: string) => {
+    const cur = filter[key];
+    const next = cur.includes(value) ? cur.filter((v) => v !== value) : [...cur, value];
+    setFilter({ ...filter, [key]: next });
+  };
+
+  const activeCount = countActiveFilters(filter);
+
+  // 选项按命中数降序：0 命中的沉到末尾（ChipGroup 里会置灰），已选的优先置顶
+  const rank = (names: string[], counts: Map<string, number>) =>
+    [...names].sort((a, b) => {
+      const sa = filter.publishers.includes(a) || filter.categories.includes(a) || filter.types.includes(a) || filter.quartiles.includes(a);
+      const sb = filter.publishers.includes(b) || filter.categories.includes(b) || filter.types.includes(b) || filter.quartiles.includes(b);
+      if (sa !== sb) return sa ? -1 : 1;
+      const d = (counts.get(b) ?? 0) - (counts.get(a) ?? 0);
+      return d !== 0 ? d : a.localeCompare(b);
+    });
+
+  return (
+    <div className="space-y-4">
       {/* 出版社多选 */}
       {publishers.length > 0 && (
         <ChipGroup
           title="出版社"
-          options={publishers}
+          options={rank(publishers, live.publishers)}
           selected={filter.publishers}
-          counts={pubCounts}
+          counts={live.publishers}
           onToggle={(v) => toggle('publishers', v)}
         />
       )}
@@ -584,9 +646,9 @@ function FilterBar({
       {categories.length > 0 && (
         <ChipGroup
           title="学科"
-          options={categories}
+          options={rank(categories, live.categories)}
           selected={filter.categories}
-          counts={catCounts}
+          counts={live.categories}
           onToggle={(v) => toggle('categories', v)}
         />
       )}
@@ -594,20 +656,20 @@ function FilterBar({
       {types.length > 0 && (
         <ChipGroup
           title="类型"
-          options={types.map(cfpTypeLabel)}
-          values={types}
+          options={rank(types, live.types).map(cfpTypeLabel)}
+          values={rank(types, live.types)}
           selected={filter.types}
-          counts={tyCounts}
+          counts={live.types}
           onToggle={(v) => toggle('types', v)}
         />
       )}
       {/* SJR 分区多选（依赖 journal_meta.json，无数据时隐藏） */}
-      {qCounts.size > 0 && (
+      {live.quartiles.size > 0 && (
         <ChipGroup
           title="分区（SJR）"
-          options={['Q1', 'Q2', 'Q3', 'Q4'].filter((q) => qCounts.has(q))}
+          options={['Q1', 'Q2', 'Q3', 'Q4'].filter((q) => live.quartiles.has(q))}
           selected={filter.quartiles}
-          counts={qCounts}
+          counts={live.quartiles}
           onToggle={(v) => toggle('quartiles', v)}
         />
       )}
@@ -727,6 +789,27 @@ function FilterBar({
   );
 }
 
+/**
+ * 分面栏容器（P1-1）。
+ * - 宽屏 ≥lg：常驻左侧 272px，sticky 吸附，面板内部独立滚动，不再横向挤占结果区；
+ * - 窄屏 <lg：由顶部工具条的「筛选」按钮控制展开 / 收起。
+ *
+ * 分面内容（FilterBar）与容器解耦，两种布局共用同一份 JSX，不重复渲染。
+ */
+function FacetSidebar({ open, children }: { open: boolean; children: ReactNode }) {
+  return (
+    <aside
+      className={`${
+        open ? 'block' : 'hidden'
+      } lg:block lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto lg:pr-1`}
+    >
+      <div className="bg-white dark:bg-[#161b22] border border-gray-200 dark:border-gray-800 rounded-xl p-3 sm:p-4 shadow-sm mb-4 lg:mb-0">
+        {children}
+      </div>
+    </aside>
+  );
+}
+
 interface ChipGroupProps {
   title: string;
   options: string[];
@@ -748,14 +831,19 @@ function ChipGroup({ title, options, values, selected, counts, onToggle }: ChipG
           const k = keys[i];
           const on = selected.includes(k);
           const c = counts.get(k) ?? 0;
+          // 0 命中且未选中 → 禁用，避免点进去空列表（P1-3 死路治理）
           return (
             <button
               key={k}
               onClick={() => onToggle(k)}
+              disabled={!on && c === 0}
+              title={!on && c === 0 ? '当前其它筛选条件下没有匹配结果' : `${opt}：${c} 条`}
               className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
                 on
                   ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm shadow-indigo-500/25'
-                  : 'bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-700 hover:border-indigo-400 dark:hover:border-indigo-500'
+                  : c === 0
+                    ? 'bg-gray-50 dark:bg-gray-900/50 text-gray-400 dark:text-gray-600 border-gray-200 dark:border-gray-800 cursor-not-allowed'
+                    : 'bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-700 hover:border-indigo-400 dark:hover:border-indigo-500'
               }`}
             >
               {opt} <span className="opacity-70">({c})</span>
@@ -965,6 +1053,101 @@ function CFPCard({ record, now, metric, favorite, onToggleFavorite, tz }: { reco
 }
 
 // ───────────────────────────────────────────────────────────────────
+// 子组件：紧凑表格行（P0-4）
+//
+// 卡片视图 ~110px 一行，一屏只能看 5 条；6 万条数据下扫读极其痛苦。
+// 紧凑行 ~44px，同屏能看到 12 条左右，扫读效率翻倍，首屏渲染量反而下降。
+// 信息优先级（从左到右）：收藏 → 标题 → 期刊 → 出版社 → 分区 → 学科 → 倒计时 → CTA，
+// 窄屏按 md/lg/xl 逐级隐藏次要列，保证标题与倒计时永远可见。
+// ───────────────────────────────────────────────────────────────────
+function CFPRow({
+  record,
+  now,
+  metric,
+  favorite,
+  onToggleFavorite,
+}: {
+  record: CFPRecord;
+  now: number;
+  metric?: JournalMetric;
+  favorite: boolean;
+  onToggleFavorite: (id: string) => void;
+}) {
+  const rolling = Boolean(record.rolling);
+  const days = daysUntil(record.dt, now);
+  const urgency = urgencyOf(days, rolling);
+  const cd = countdownState(record.dt, now, rolling);
+  const pStyle = publisherStyle(record.p);
+
+  return (
+    <div className="relative flex items-center gap-2 pl-3 pr-2 py-2 border-b border-gray-100 dark:border-gray-800/70 hover:bg-indigo-50/60 dark:hover:bg-indigo-950/20 transition-colors group">
+      <span className={`absolute left-0 top-0 bottom-0 w-0.5 ${URGENCY_STRIPE[urgency]}`} aria-hidden />
+
+      <button
+        onClick={() => onToggleFavorite(record.id)}
+        className={`p-0.5 rounded shrink-0 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors ${
+          favorite ? 'text-amber-500' : 'text-gray-300 dark:text-gray-600 hover:text-gray-500'
+        }`}
+        aria-label={favorite ? '取消收藏' : '收藏'}
+        title={favorite ? '取消收藏' : '收藏'}
+      >
+        <Star className={`w-3.5 h-3.5 ${favorite ? 'fill-amber-400 text-amber-400' : ''}`} />
+      </button>
+
+      <a
+        href={record.u}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={record.t}
+        className="flex-1 min-w-0 truncate text-sm text-gray-900 dark:text-gray-100 hover:text-indigo-600 dark:hover:text-indigo-400"
+      >
+        {record.t}
+      </a>
+
+      <span
+        className="hidden md:block w-40 shrink-0 truncate text-xs text-gray-600 dark:text-gray-400"
+        title={record.j}
+      >
+        {record.j}
+      </span>
+
+      <span
+        className={`hidden lg:block w-24 shrink-0 truncate px-1.5 py-0.5 rounded text-[11px] text-center ${pStyle.badge}`}
+        title={record.p}
+      >
+        {record.p}
+      </span>
+
+      <span className="hidden sm:block shrink-0">
+        <MetricBadge metric={metric} />
+      </span>
+
+      <span className="hidden xl:block w-28 shrink-0 truncate text-[11px] text-gray-500 dark:text-gray-500">
+        {record.c}
+      </span>
+
+      <span
+        className={`shrink-0 px-2 py-0.5 rounded-full text-[11px] font-medium bg-gray-50 dark:bg-gray-800/80 tabular-nums ${urgencyClass(days, rolling)}`}
+        title={cd.label}
+      >
+        {cd.text}
+      </span>
+
+      <a
+        href={record.u}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="shrink-0 text-gray-400 hover:text-indigo-500 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+        aria-label="查看征稿详情"
+        title="在出版商官网查看征稿详情"
+      >
+        <ExternalLink className="w-3.5 h-3.5" />
+      </a>
+    </div>
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────
 // 子组件：分页器
 // ───────────────────────────────────────────────────────────────────
 
@@ -1031,6 +1214,8 @@ function Pagination({ page, totalPages, onPage }: { page: number; totalPages: nu
 // 子组件：列表 + 分页
 // ───────────────────────────────────────────────────────────────────
 const PAGE_SIZE = 30;
+/** 紧凑行更高更省空间，每页给更多条，翻页次数显著减少 */
+const PAGE_SIZE_ROW = 50;
 
 interface ListAreaProps {
   records: CFPRecord[];
@@ -1053,11 +1238,14 @@ interface ListAreaProps {
   favorites: Set<string>;
   onToggleFavorite: (id: string) => void;
   tz: string;
+  /** 列表呈现方式：卡片（信息全）或紧凑行（密度高） */
+  viewMode: ViewMode;
 }
 
-function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMore, loadingMore, hasMoreMonths, journalMeta, index, activeFacets, showExpired, onShowExpired, favoritesOnly, favoritesCount, onLoadFavorites, favHint, favorites, onToggleFavorite, tz }: ListAreaProps) {
+function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMore, loadingMore, hasMoreMonths, journalMeta, index, activeFacets, showExpired, onShowExpired, favoritesOnly, favoritesCount, onLoadFavorites, favHint, favorites, onToggleFavorite, tz, viewMode }: ListAreaProps) {
   const [page, setPage] = useState(1);
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pageSize = viewMode === 'row' ? PAGE_SIZE_ROW : PAGE_SIZE;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
 
   // 筛选条件变化时回到第一页（加载更多月份不重置）
   const prevSig = useRef(filterSignature);
@@ -1070,8 +1258,8 @@ function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMo
 
   const safePage = Math.min(page, totalPages);
   const visible = useMemo(
-    () => filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
-    [filtered, safePage],
+    () => filtered.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [filtered, safePage, pageSize],
   );
   const onLastPage = safePage >= totalPages;
 
@@ -1199,7 +1387,32 @@ function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMo
         <span>共 {filtered.length.toLocaleString()} 条匹配</span>
         {totalPages > 1 && <span>第 {safePage} / {totalPages} 页</span>}
       </div>
-      <div className="space-y-2">
+      {viewMode === 'row' ? (
+        <div className="border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden bg-white dark:bg-[#161b22]">
+          {/* 表头：与 CFPRow 的列宽保持一致 */}
+          <div className="hidden md:flex items-center gap-2 pl-3 pr-2 py-1.5 text-[11px] font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800/50 border-b border-gray-200 dark:border-gray-800">
+            <span className="w-4 shrink-0" />
+            <span className="flex-1 min-w-0">标题</span>
+            <span className="w-40 shrink-0">期刊</span>
+            <span className="hidden lg:block w-24 shrink-0">出版社</span>
+            <span className="hidden sm:block shrink-0">分区</span>
+            <span className="hidden xl:block w-28 shrink-0">学科</span>
+            <span className="w-16 shrink-0 text-right">倒计时</span>
+            <span className="w-4 shrink-0" />
+          </div>
+          {visible.map((r) => (
+            <CFPRow
+              key={r.id}
+              record={r}
+              now={now}
+              metric={r.is ? journalMeta.get(r.is) : undefined}
+              favorite={favorites.has(r.id)}
+              onToggleFavorite={onToggleFavorite}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="space-y-2">
           {visible.map((r) => (
             <CFPCard
               key={r.id}
@@ -1211,7 +1424,8 @@ function ListArea({ records, filtered, now, hasFilter, filterSignature, onLoadMo
               tz={tz}
             />
           ))}
-      </div>
+        </div>
+      )}
 
       {/* 末页且还有未加载月份 → 提供加载更多分片入口 */}
       {onLastPage && hasMoreMonths && (
@@ -1371,6 +1585,31 @@ export default function App() {
 
   // 浏览器本地时区（用于截止日本地时间展示）
   const localTz = useMemo(() => getLocalTimeZone(), []);
+
+  // 视觉皮肤：rich（精致）/ minimal（苹果级极简），localStorage 持久化
+  const [skin, setSkin] = useState<Skin>(() => loadSkin());
+  useEffect(() => {
+    saveSkin(skin);
+  }, [skin]);
+
+  // 列表视图模式（紧凑行 / 卡片），localStorage 持久化
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    try {
+      return localStorage.getItem(VIEW_MODE_KEY) === 'row' ? 'row' : 'card';
+    } catch {
+      return 'card';
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(VIEW_MODE_KEY, viewMode);
+    } catch {
+      /* 隐私模式下 localStorage 不可写，忽略即可 */
+    }
+  }, [viewMode]);
+
+  // 窄屏分面面板展开状态（宽屏始终常驻，此状态不生效）
+  const [facetOpen, setFacetOpen] = useState(false);
 
   // URL → state（首屏）
   useEffect(() => {
@@ -1727,7 +1966,10 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-[#0d1117] text-gray-900 dark:text-gray-100">
+    <div
+      data-skin={skin}
+      className="min-h-screen bg-gray-50 dark:bg-[#0d1117] text-gray-900 dark:text-gray-100"
+    >
       <Header
         index={index}
         theme={theme}
@@ -1743,8 +1985,10 @@ export default function App() {
         onApplyView={handleApplyView}
         onDeleteView={handleDeleteView}
         appliedView={appliedView}
+        skin={skin}
+        onToggleSkin={() => setSkin((s) => (s === 'rich' ? 'minimal' : 'rich'))}
       />
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-4 sm:py-6">
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-4 sm:py-6">
         {phase === 'loading-shards' && records.length === 0 ? (
           <LoadingScreen message={`加载 ${selectInitialMonths(index!).length} 个月份分片…`} />
         ) : (
@@ -1757,72 +2001,122 @@ export default function App() {
               onSelectMonth={handleSelectMonth}
               onClearFocus={clearFocusMonth}
             />
-            <FilterBar
+            <SearchToolbar
               filter={filter}
               setFilter={setFilter}
-              records={records}
-              publishers={publisherList}
-              categories={categoryList}
-              types={typeList}
-              journalMeta={journalMeta}
-              index={index}
-              showExpired={showExpired}
-              onToggleExpired={() => setShowExpired((v) => !v)}
-              favoritesOnly={favoritesOnly}
-              onToggleFavoritesOnly={() => setFavoritesOnly((v) => !v)}
-              onSaveView={handleSaveView}
-              balanced={filter.balanced}
-              onToggleBalanced={() => setFilter({ ...filter, balanced: !filter.balanced })}
-              hideMdpiRolling={filter.hideMdpiRolling}
-              onToggleHideMdpiRolling={() =>
-                setFilter({ ...filter, hideMdpiRolling: !filter.hideMdpiRolling })
-              }
+              activeCount={countActiveFilters(filter)}
+              facetOpen={facetOpen}
+              onToggleFacetOpen={() => setFacetOpen((v) => !v)}
             />
 
-            <BucketSwitch
-              bucket={filter.bucket}
-              onBucket={(b) => setFilter({ ...filter, bucket: b })}
-              upcomingCount={upcomingCount}
-              rollingCount={rollingCount}
-            />
-            {expansionHint && (
-              <div className="mb-3 text-center text-xs text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900 rounded-lg py-2 px-3">
-                <Sparkles className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
-                {expansionHint}
+            {/* P1-1：宽屏 = 左侧常驻分面栏 + 右侧结果区；窄屏自动回落为单列 + 折叠面板 */}
+            <div className="lg:grid lg:grid-cols-[272px_minmax(0,1fr)] lg:gap-5 lg:items-start">
+              <FacetSidebar open={facetOpen}>
+                <FilterBar
+                  filter={filter}
+                  setFilter={setFilter}
+                  records={records}
+                  publishers={publisherList}
+                  categories={categoryList}
+                  types={typeList}
+                  journalMeta={journalMeta}
+                  nowMs={now.getTime()}
+                  showExpired={showExpired}
+                  onToggleExpired={() => setShowExpired((v) => !v)}
+                  favoritesOnly={favoritesOnly}
+                  onToggleFavoritesOnly={() => setFavoritesOnly((v) => !v)}
+                  onSaveView={handleSaveView}
+                  balanced={filter.balanced}
+                  onToggleBalanced={() => setFilter({ ...filter, balanced: !filter.balanced })}
+                  hideMdpiRolling={filter.hideMdpiRolling}
+                  onToggleHideMdpiRolling={() =>
+                    setFilter({ ...filter, hideMdpiRolling: !filter.hideMdpiRolling })
+                  }
+                />
+              </FacetSidebar>
+
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+              <BucketSwitch
+                bucket={filter.bucket}
+                onBucket={(b) => setFilter({ ...filter, bucket: b })}
+                upcomingCount={upcomingCount}
+                rollingCount={rollingCount}
+              />
+              {/* 视图切换：紧凑行一屏 ~12 条，卡片一屏 ~5 条 */}
+              <div
+                className="inline-flex rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-[#161b22] p-0.5 shrink-0"
+                role="group"
+                aria-label="列表视图切换"
+              >
+                {(
+                  [
+                    { value: 'row' as ViewMode, label: '紧凑', Icon: LayoutList },
+                    { value: 'card' as ViewMode, label: '卡片', Icon: LayoutGrid },
+                  ]
+                ).map(({ value, label, Icon }) => {
+                  const active = viewMode === value;
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => setViewMode(value)}
+                      title={value === 'row' ? '紧凑行：同屏约 12 条，适合扫读' : '卡片：信息完整，适合细看'}
+                      className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md text-sm transition-colors ${
+                        active
+                          ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/25'
+                          : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'
+                      }`}
+                    >
+                      <Icon className="w-3.5 h-3.5" />
+                      {label}
+                    </button>
+                  );
+                })}
+                </div>
+                </div>
+                {expansionHint && (
+                  <div className="mb-3 text-center text-xs text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900 rounded-lg py-2 px-3">
+                    <Sparkles className="w-3.5 h-3.5 inline mr-1 -mt-0.5" />
+                    {expansionHint}
+                  </div>
+                )}
+                <ListArea
+                  records={records}
+                  filtered={displayed}
+                  now={now.getTime()}
+                  hasFilter={hasAnyFilter(filter)}
+                  filterSignature={filterSignature}
+                  onLoadMore={handleLoadMore}
+                  loadingMore={loadingMore}
+                  hasMoreMonths={hasMoreMonths}
+                  journalMeta={journalMeta}
+                  index={index}
+                  activeFacets={{ publishers: filter.publishers, categories: filter.categories, types: filter.types }}
+                  showExpired={showExpired}
+                  onShowExpired={() => setShowExpired(true)}
+                  favoritesOnly={favoritesOnly}
+                  favoritesCount={favCount}
+                  onLoadFavorites={handleLoadFavorites}
+                  favHint={favHint}
+                  favorites={favorites}
+                  onToggleFavorite={toggleFavorite}
+                  tz={localTz}
+                  viewMode={viewMode}
+                />
+                {index && (
+                  <p className="mt-6 text-center text-xs text-gray-400 dark:text-gray-500">
+                    <TrendingUp className="w-3 h-3 inline mr-1 -mt-0.5" />
+                    全库共 {index.total.toLocaleString()} 条 · 已加载 {records.length.toLocaleString()} 条
+                    {index.rolling_count ? ` · 含滚动征稿 ${index.rolling_count.toLocaleString()} 条` : ''}
+                  </p>
+                )}
+                {index && (
+                  <p className="mt-1 text-center text-xs text-gray-400 dark:text-gray-500">{AOE_HINT}</p>
+                )}
               </div>
-            )}
-            <ListArea
-              records={records}
-              filtered={displayed}
-              now={now.getTime()}
-              hasFilter={hasAnyFilter(filter)}
-              filterSignature={filterSignature}
-              onLoadMore={handleLoadMore}
-              loadingMore={loadingMore}
-              hasMoreMonths={hasMoreMonths}
-              journalMeta={journalMeta}
-              index={index}
-              activeFacets={{ publishers: filter.publishers, categories: filter.categories, types: filter.types }}
-              showExpired={showExpired}
-              onShowExpired={() => setShowExpired(true)}
-              favoritesOnly={favoritesOnly}
-              favoritesCount={favCount}
-              onLoadFavorites={handleLoadFavorites}
-              favHint={favHint}
-              favorites={favorites}
-              onToggleFavorite={toggleFavorite}
-              tz={localTz}
-            />
-            {index && (
-              <p className="mt-6 text-center text-xs text-gray-400 dark:text-gray-500">
-                <TrendingUp className="w-3 h-3 inline mr-1 -mt-0.5" />
-                全库共 {index.total.toLocaleString()} 条 · 已加载 {records.length.toLocaleString()} 条
-                {index.rolling_count ? ` · 含滚动征稿 ${index.rolling_count.toLocaleString()} 条` : ''}
-              </p>
-            )}
-            {index && (
-              <p className="mt-1 text-center text-xs text-gray-400 dark:text-gray-500">{AOE_HINT}</p>
-            )}
+            </div>
           </>
         )}
       </main>
